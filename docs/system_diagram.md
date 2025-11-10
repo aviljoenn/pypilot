@@ -3,7 +3,7 @@
 The diagram below summarizes the electrical and data connections for the pypilot installation described in the recent discussion. It combines the high-current drive path, Arduino Nano servo controller, Raspberry Pi 5 running pypilot, the remote Signal K server, and the supported sensors/actuators.
 
 ```mermaid
-graph TD
+flowchart TD
     subgraph Power_Stage["Power & Motor Drive"]
         Battery["12V Battery Bank"] -->|Fuse or Breaker| Fuse["Fuse / Breaker"]
         Fuse -->|B+| IBT2["IBT-2 (BTS7960) Dual 43A H-Bridge"]
@@ -14,8 +14,8 @@ graph TD
 
     subgraph Servo_Controller["Arduino Nano Motor Controller"]
         Nano["Arduino Nano running motor.ino"]
-        Nano -->|PWM: D9→RPWM, D10→LPWM| IBT2
-        Nano -->|5V / GND| IBT2
+        Nano -->|PWM D9→RPWM, D10→LPWM| IBT2
+        Nano -->|5V and GND| IBT2
         Nano -. "Optional D4/D5 current range select" .-> ShuntConfig["Current Shunt Relays"]
         Nano -->|A0 voltage sense divider| Battery
         Nano -->|A1 current sense| IBT2_IS["IBT-2 R_IS / L_IS"]
@@ -29,9 +29,9 @@ graph TD
 
     subgraph Pi5["Pypilot Host"]
         Pi["Raspberry Pi 5 running pypilot"]
-        Pi -->|UART (TX/RX + 5V/GND)| Nano
-        Pi -->|I2C / SPI / USB| IMU["9-DOF IMU (gyro + accelerometer + magnetometer)"]
-        Pi -->|Ethernet / Wi-Fi| Network[("Vessel Network")]
+        Pi -->|UART: TX/RX plus 5V and GND| Nano
+        Pi -->|I2C, SPI, or USB| IMU["9-DOF IMU (gyro + accelerometer + magnetometer)"]
+        Pi -->|Ethernet or Wi-Fi| Network["Vessel Network"]
     end
 
     subgraph Remote_SignalK["Remote Sensor Sources"]
