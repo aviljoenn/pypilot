@@ -8,6 +8,10 @@ Clone the repository by running the following command:
 git clone https://github.com/pypilot/pypilot
 ```
 
+## Main components
+
+For this project we will use a Raspberry Pi5, Arduino Nano, HKD Dual 43A H-Bridge Motor Driver (IBT-2) and GY-LSM9DS1 9 AXIS IMU ACCEL, GYRO, MAGNETOMETER:
+
 ### Dependencies
 
 You could install the dependencies with the following command:
