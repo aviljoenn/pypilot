@@ -118,11 +118,16 @@ PWR+             VIN
 
 //#define VNH2SP30 // defined if this board is used
 //#define DISABLE_TEMP_SENSE    // if no temp sensors avoid errors
-#define DISABLE_VOLTAGE_SENSE // no voltage feedback wired on Andre build
+//#define DISABLE_VOLTAGE_SENSE // no voltage feedback wired on Andre build
 //#define DISABLE_RUDDER_SENSE  // if no rudder sense
 
 // Custom build for Andre's IBT-2 + Nano wiring
 #define IBT2_ANDRE_BUILD
+
+#ifdef IBT2_ANDRE_BUILD
+#define DISABLE_TEMP_SENSE
+#define DISABLE_VOLTAGE_SENSE
+#endif
 
 
 // run at 4mhz instead of 16mhz to save power
@@ -168,7 +173,9 @@ static volatile uint8_t timer1_state;
 #define shunt_sense_pin 4 // use pin 4 to specify shunt resistance
 uint8_t shunt_resistance = 1;
 
+#ifndef IBT2_ANDRE_BUILD
 #define low_current_pin 5 // use pin 5 to specify low current (no amplifier)
+#endif
 uint8_t low_current = 1;
 
 #define ratiometric_mode (!shunt_resistance && !low_current)
@@ -397,7 +404,9 @@ void setup()
     digitalWrite(A4, LOW);
 
     pinMode(shunt_sense_pin, INPUT_PULLUP);
+#ifndef IBT2_ANDRE_BUILD
     pinMode(low_current_pin, INPUT_PULLUP);
+#endif
     pinMode(pwm_style_pin, INPUT_PULLUP);
     pinMode(clutch_pin, INPUT_PULLUP);
     pinMode(voltage_sense_pin, INPUT_PULLUP);
@@ -453,8 +462,10 @@ void setup()
     pinMode(shunt_sense_pin, INPUT);
     digitalWrite(shunt_sense_pin, HIGH); /* enable internal pullups */
 
+#ifndef IBT2_ANDRE_BUILD
     pinMode(low_current_pin, INPUT);
     digitalWrite(low_current_pin, HIGH); /* enable internal pullups */
+#endif
 
     _delay_us(100); // time to settle
 
@@ -465,10 +476,12 @@ void setup()
 #ifdef IBT2_ANDRE_BUILD
     pwm_style = 4; // custom IBT-2 mode
 #endif
+#ifndef IBT2_ANDRE_BUILD
     if(pwm_style) {
         digitalWrite(pwm_output_pin, LOW); /* enable internal pullups */
         pinMode(pwm_output_pin, OUTPUT);
     }
+#endif
 
 #if defined(__AVR_ATmega328pb__)
     // read device signature bytes to identify processor
@@ -497,10 +510,12 @@ void setup()
     // test shunt type, if pin wired to ground, we have 0.01 ohm, otherwise 0.05 ohm
     shunt_resistance = digitalRead(shunt_sense_pin);
 
+#ifndef IBT2_ANDRE_BUILD
     // test current
     low_current = digitalRead(low_current_pin);
     if(!low_current)
         max_current = 4000; // default start at 40 amps
+#endif
 
     // setup adc
     DIDR0 = 0x1f; // disable digital io on analog pins
@@ -1020,9 +1035,9 @@ uint16_t TakeAmps(uint8_t p)
 
 uint16_t TakeVolts(uint8_t p)
 {
-#ifdef IBT2_ANDRE_BUILD
+#ifdef DISABLE_VOLTAGE_SENSE
     (void)p;
-    return 1200; // report 12.0V nominal for bench testing
+    return 1200; // report nominal voltage when sensing is disabled
 #endif
     // voltage in 10mV increments 1.1ref, 560 and 10k resistors
     uint32_t v = TakeADC(VOLTAGE, p);
@@ -1441,6 +1456,7 @@ void loop()
     service_adc();
 
     const int voltage_react_count = 400/DIV_CLOCK; // 200sps @ 8mhz 1s reaction
+#ifndef DISABLE_VOLTAGE_SENSE
     if(CountADC(VOLTAGE, 1) > voltage_react_count) { // 1 second
         uint16_t volts = TakeVolts(1);
         if(volts >= 1800 && !voltage_mode && !voltage_sense) {
@@ -1459,6 +1475,9 @@ void loop()
         } else
             flags &= ~BADVOLTAGE_FAULT;
     }
+#else
+    flags &= ~BADVOLTAGE_FAULT;
+#endif
     service_adc();
 
     flags |= faults;
@@ -1467,6 +1486,7 @@ void loop()
     const int temp_react_count = 100/DIV_CLOCK; // 1 second
     if(CountADC(CONTROLLER_TEMP, 1) > temp_react_count &&
        CountADC(MOTOR_TEMP, 1) > temp_react_count) {
+#ifndef DISABLE_TEMP_SENSE
         uint16_t controller_temp = TakeTemp(CONTROLLER_TEMP, 1);
         uint16_t motor_temp = TakeTemp(MOTOR_TEMP, 1);
         if(controller_temp >= max_controller_temp || motor_temp > max_motor_temp) {
@@ -1482,6 +1502,9 @@ void loop()
             TCCR0B = 0;
             asm volatile ("ijmp" ::"z" (0x0000)); // attempt soft reset
         }
+#else
+        flags &= ~OVERTEMP_FAULT;
+#endif
     }
     service_adc();
 
