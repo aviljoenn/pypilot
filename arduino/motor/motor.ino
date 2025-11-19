@@ -118,8 +118,11 @@ PWR+             VIN
 
 //#define VNH2SP30 // defined if this board is used
 //#define DISABLE_TEMP_SENSE    // if no temp sensors avoid errors
-//#define DISABLE_VOLTAGE_SENSE // if no voltage sense
+#define DISABLE_VOLTAGE_SENSE // no voltage feedback wired on Andre build
 //#define DISABLE_RUDDER_SENSE  // if no rudder sense
+
+// Custom build for Andre's IBT-2 + Nano wiring
+#define IBT2_ANDRE_BUILD
 
 
 // run at 4mhz instead of 16mhz to save power
@@ -174,11 +177,26 @@ uint8_t low_current = 1;
 // pwm style, 0 = hbridge, 1 = rc pwm, 2 = vnh2sp30
 uint8_t pwm_style = 2; // detected to 0 or 1 unless detection disabled, default 2
 
+#ifdef IBT2_ANDRE_BUILD
+// Andre's IBT-2 + Nano pinout
+#define port_fault_pin 9
+#define starboard_fault_pin 10
+#define ibt_r_pwm_pin 5
+#define ibt_l_pwm_pin 6
+#define ibt_r_en_pin 7
+#define ibt_l_en_pin 8
+#define ibt_clutch_pin clutch_pin
+#define rudder_pin A2
+#define current_pin A3
+#endif
+#ifndef IBT2_ANDRE_BUILD
 #define port_fault_pin 7 // use pin 7 for optional fault
 #define starboard_fault_pin 8 // use pin 8 for optional fault
+#endif
 // if switches pull this pin low, the motor is disengaged
 // and will be noticed by the control program
 
+#ifndef IBT2_ANDRE_BUILD
 #define pwm_output_pin 9
 
 #define hbridge_a_bottom_pin 2
@@ -186,6 +204,7 @@ uint8_t pwm_style = 2; // detected to 0 or 1 unless detection disabled, default 
 #define hbridge_a_top_pin 9
 #define hbridge_b_top_pin 10
 #define enable_pin 10 // for vnh2sp30
+#endif
 
 // for direct mosfet mode, define how to turn on/off mosfets
 // do not use digitalWrite!
@@ -297,6 +316,10 @@ uint16_t max_motor_temp = 7000; // 70C
 uint8_t max_slew_speed = 50, max_slew_slow = 75; // 200 is full power in 1/10th of a second
 uint16_t rudder_min = 0, rudder_max = 65535;
 
+#ifdef IBT2_ANDRE_BUILD
+uint16_t acs_zero_adc = 0;
+#endif
+
 uint8_t eeprom_read_addr = 0;
 uint8_t eeprom_read_end = 0;
 
@@ -392,11 +415,32 @@ void setup()
     pinMode(A0, INPUT);
 
 
-    digitalWrite(clutch_pin, LOW);
-    pinMode(clutch_pin, OUTPUT); // clutch
+    digitalWrite(clutch_pin, HIGH);
+    pinMode(clutch_pin, OUTPUT); // clutch (active low on Andre build)
 
     digitalWrite(led_pin, LOW);
     pinMode(led_pin, OUTPUT); // status LED
+
+#ifdef IBT2_ANDRE_BUILD
+    pinMode(ibt_r_pwm_pin, OUTPUT);
+    pinMode(ibt_l_pwm_pin, OUTPUT);
+    pinMode(ibt_r_en_pin, OUTPUT);
+    pinMode(ibt_l_en_pin, OUTPUT);
+    pinMode(port_fault_pin, INPUT_PULLUP);
+    pinMode(starboard_fault_pin, INPUT_PULLUP);
+
+    digitalWrite(ibt_r_pwm_pin, LOW);
+    digitalWrite(ibt_l_pwm_pin, LOW);
+    digitalWrite(ibt_r_en_pin, LOW);
+    digitalWrite(ibt_l_en_pin, LOW);
+    digitalWrite(clutch_pin, HIGH);
+
+    // calibrate ACS758 zero
+    uint32_t acs_total = 0;
+    for (int i = 0; i < 32; i++)
+        acs_total += analogRead(current_pin);
+    acs_zero_adc = acs_total / 32;
+#endif
 
     pinMode(port_fault_pin, INPUT);
     digitalWrite(port_fault_pin, HIGH); /* enable internal pullups */
@@ -417,6 +461,9 @@ void setup()
     // test output type, pwm or h-bridge
 #ifndef VNH2SP30
     pwm_style = digitalRead(pwm_style_pin);
+#endif
+#ifdef IBT2_ANDRE_BUILD
+    pwm_style = 4; // custom IBT-2 mode
 #endif
     if(pwm_style) {
         digitalWrite(pwm_output_pin, LOW); /* enable internal pullups */
@@ -502,6 +549,31 @@ uint16_t lastpos = 1000;
 void position(uint16_t value)
 {
     lastpos = value;
+#ifdef IBT2_ANDRE_BUILD
+    if(pwm_style == 4) {
+        // value 0..2000, 1000 neutral
+        uint8_t pwm = 0;
+        if(value > 1000) {
+            pwm = min<uint16_t>(255, (value - 1000) * 255 / 1000);
+            digitalWrite(ibt_r_en_pin, HIGH);
+            digitalWrite(ibt_l_en_pin, HIGH);
+            analogWrite(ibt_r_pwm_pin, pwm);
+            analogWrite(ibt_l_pwm_pin, 0);
+        } else if(value < 1000) {
+            pwm = min<uint16_t>(255, (1000 - value) * 255 / 1000);
+            digitalWrite(ibt_r_en_pin, HIGH);
+            digitalWrite(ibt_l_en_pin, HIGH);
+            analogWrite(ibt_r_pwm_pin, 0);
+            analogWrite(ibt_l_pwm_pin, pwm);
+        } else {
+            analogWrite(ibt_r_pwm_pin, 0);
+            analogWrite(ibt_l_pwm_pin, 0);
+            digitalWrite(ibt_r_en_pin, LOW);
+            digitalWrite(ibt_l_en_pin, LOW);
+        }
+        return;
+    }
+#endif
     if(pwm_style == 1)
 //        OCR1A = 1200/DIV_CLOCK + value * 6 / 5 / DIV_CLOCK;
         OCR1A = 1500/DIV_CLOCK + value * 3 / 2 / DIV_CLOCK;
@@ -648,7 +720,13 @@ void disengage()
     TCCR2A = 0;
     TCCR2B = 0;
     clutch_start_time = 0;
-    digitalWrite(clutch_pin, LOW); // clutch
+    digitalWrite(clutch_pin, HIGH); // clutch off (active low)
+#ifdef IBT2_ANDRE_BUILD
+    analogWrite(ibt_r_pwm_pin, 0);
+    analogWrite(ibt_l_pwm_pin, 0);
+    digitalWrite(ibt_r_en_pin, LOW);
+    digitalWrite(ibt_l_en_pin, LOW);
+#endif
 }
 
 void detach()
@@ -656,19 +734,24 @@ void detach()
     TIMSK1 = 0;
     TCCR1A=0;
     TCCR1B=0;
-    if(pwm_style) {
+    if(pwm_style && pwm_style != 4) {
         while(digitalRead(pwm_output_pin)); // wait for end of pwm if pulse is high
         if(pwm_style == 2) {
             a_bottom_off;
             b_bottom_off;
             digitalWrite(enable_pin, LOW);
         }
-    } else {
+    } else if(pwm_style != 4) {
         timer1_state = 0;
         a_top_off;
         a_bottom_off;
         b_top_off;
         b_bottom_off;
+    } else {
+        analogWrite(ibt_r_pwm_pin, 0);
+        analogWrite(ibt_l_pwm_pin, 0);
+        digitalWrite(ibt_r_en_pin, LOW);
+        digitalWrite(ibt_l_en_pin, LOW);
     }
 #if defined(__AVR_ATmega328pb__)
     if(pwm_style == 3)
@@ -698,7 +781,15 @@ void engage()
     if(flags & ENGAGED)
         return; // already engaged
 
-    if(pwm_style == 1) {
+    if(pwm_style == 4) {
+        digitalWrite(clutch_pin, LOW); // clutch on
+        clutch_start_time = 10; // ~200ms at 50Hz loop
+        digitalWrite(ibt_r_en_pin, LOW);
+        digitalWrite(ibt_l_en_pin, LOW);
+        analogWrite(ibt_r_pwm_pin, 0);
+        analogWrite(ibt_l_pwm_pin, 0);
+    }
+    else if(pwm_style == 1) {
         TCNT1 = 0x1fff;
         //Configure TIMER1
         TCCR1A=_BV(COM1A1)|_BV(WGM11);        //NON Inverted PWM
@@ -746,14 +837,16 @@ void engage()
     }
 
     position(1000);
-    digitalWrite(clutch_pin, HIGH); // clutch
-    clutch_start_time = 20;
-    TCCR2A = 0;
+    if(pwm_style != 4) {
+        digitalWrite(clutch_pin, HIGH); // clutch
+        clutch_start_time = 20;
+        TCCR2A = 0;
 
-    if(!digitalRead(clutch_sense_pwm_pin) && ratiometric_mode)
-        TCCR2B = _BV(CS20); // divide 1 and pwm ~16khz;
-    else
-        TCCR2B = _BV(CS21); // divide 8 and 2khz or fast pwm 4khz if not ratiometric
+        if(!digitalRead(clutch_sense_pwm_pin) && ratiometric_mode)
+            TCCR2B = _BV(CS20); // divide 1 and pwm ~16khz;
+        else
+            TCCR2B = _BV(CS21); // divide 8 and 2khz or fast pwm 4khz if not ratiometric
+    }
     digitalWrite(led_pin, HIGH); // status LED
     flags |= ENGAGED;
 }
@@ -761,7 +854,11 @@ void engage()
 // set hardware pwm to period of "(1500 + 1.5*value)/2" or "750 + .75*value" microseconds
 
 enum {CURRENT, VOLTAGE, CONTROLLER_TEMP, MOTOR_TEMP, RUDDER, CHANNEL_COUNT};
+#ifdef IBT2_ANDRE_BUILD
+const uint8_t muxes[] = {_BV(MUX0) | _BV(MUX1), 0, _BV(MUX1), _BV(MUX0) | _BV(MUX1), _BV(MUX1)}; // current=A3, rudder=A2
+#else
 const uint8_t muxes[] = {_BV(MUX0), 0, _BV(MUX1), _BV(MUX0) | _BV(MUX1), _BV(MUX2)};
+#endif
 
 volatile struct adc_results_t {
     uint32_t total;
@@ -876,11 +973,19 @@ uint16_t TakeADC(uint8_t index, uint8_t p)
 
 uint16_t TakeAmps(uint8_t p)
 {
+#ifdef IBT2_ANDRE_BUILD
+    uint16_t adc_raw = TakeADC(CURRENT, p);
+    float v = adc_raw * (5.0f / 1023.0f);
+    float v_zero = acs_zero_adc * (5.0f / 1023.0f);
+    float current_a = (v - v_zero) * 1000.0f / 40.0f; // approx 40mV/A
+    int16_t scaled = (int16_t)(current_a * 100.0f); // hundredths of amp
+    return (uint16_t)max(0, scaled);
+#else
     uint32_t v = TakeADC(CURRENT, p);
 
     if(pwm_style == 2) // VNH2SP30
         return v * 9 / 34 / 16;
-    
+
     if(low_current) {
     // current units of 10mA
     // 275 / 128 = 100.0/1024/.05*1.1   for 0.05 ohm shunt
@@ -910,10 +1015,15 @@ uint16_t TakeAmps(uint8_t p)
         return 0;
 
     return v;
+#endif
 }
 
 uint16_t TakeVolts(uint8_t p)
 {
+#ifdef IBT2_ANDRE_BUILD
+    (void)p;
+    return 1200; // report 12.0V nominal for bench testing
+#endif
     // voltage in 10mV increments 1.1ref, 560 and 10k resistors
     uint32_t v = TakeADC(VOLTAGE, p);
 
@@ -968,8 +1078,21 @@ uint16_t TakeTemp(uint8_t index, uint8_t p)
 
 uint16_t TakeRudder(uint8_t p)
 {
+    uint16_t adc_value = TakeADC(RUDDER, p);
+#ifdef IBT2_ANDRE_BUILD
+    const float raw_low = 154.0;
+    const float raw_high = 710.0;
+    const float raw_mid = 432.0;
+    const float half_span = (raw_high - raw_low) / 2.0;
+    float norm = ((float)adc_value - raw_mid) / half_span;
+    float rudder_deg = norm * 35.0; // +/-35 degrees
+    int16_t scaled = (int16_t)(rudder_deg * 100.0); // hundredths of degree
+    // Map into unsigned 16-bit space expected by protocol
+    return (uint16_t)(scaled + 32768);
+#else
     // 16 bit value for rudder
-    return TakeADC(RUDDER, p) * 4;
+    return adc_value * 4;
+#endif
 }
 
 #if 0
@@ -1291,13 +1414,14 @@ void loop()
     }
 
     // test fault pins
-    if(!digitalRead(port_fault_pin)) {
+    // limit switches are normally closed to GND (LOW = OK)
+    if(digitalRead(port_fault_pin)) {
         stop_port();
         flags |= PORT_PIN_FAULT;
     } else
       flags &= ~PORT_PIN_FAULT;
 
-    if(!digitalRead(starboard_fault_pin)) {
+    if(digitalRead(starboard_fault_pin)) {
         stop_starboard();
         flags |= STARBOARD_PIN_FAULT;
     } else
