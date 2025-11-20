@@ -565,12 +565,12 @@ void position(uint16_t value)
 {
     lastpos = value;
 #ifdef IBT2_ANDRE_BUILD
-    if(pwm_style == 4) {
+    if (pwm_style == 4) {
         // value 0..2000, 1000 neutral
         uint8_t pwm = 0;
-        const uint8_t PWM_MIN = 80;  // ~30% duty, just for bench
+        const uint8_t PWM_MIN = 80;  // ~30% duty for visible bench movement
 
-        if(value > 1010) {  // ignore tiny deadband around 1000
+        if (value > 1010) {  // ignore tiny deadband around 1000
             uint16_t delta = value - 1000;
             pwm = min((uint16_t)255,
                       (uint16_t)(PWM_MIN + (delta * (255 - PWM_MIN) / 1000)));
@@ -578,7 +578,7 @@ void position(uint16_t value)
             digitalWrite(ibt_l_en_pin, HIGH);
             analogWrite(ibt_r_pwm_pin, pwm);
             analogWrite(ibt_l_pwm_pin, 0);
-        } else if(value < 990) {
+        } else if (value < 990) {
             uint16_t delta = 1000 - value;
             pwm = min((uint16_t)255,
                       (uint16_t)(PWM_MIN + (delta * (255 - PWM_MIN) / 1000)));
