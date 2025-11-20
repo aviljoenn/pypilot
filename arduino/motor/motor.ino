@@ -107,7 +107,6 @@ PWR+             VIN
 #include <stdint.h>
 #include <stdarg.h>
 #include <HardwareSerial.h>
-#include <algorithm>
 
 #include <avr/wdt.h>
 #include <avr/sleep.h>
@@ -570,13 +569,13 @@ void position(uint16_t value)
         // value 0..2000, 1000 neutral
         uint8_t pwm = 0;
         if(value > 1000) {
-            pwm = std::min<uint16_t>(255, (value - 1000) * 255 / 1000);
+            pwm = min((uint16_t)255, (uint16_t)((value - 1000) * 255 / 1000));
             digitalWrite(ibt_r_en_pin, HIGH);
             digitalWrite(ibt_l_en_pin, HIGH);
             analogWrite(ibt_r_pwm_pin, pwm);
             analogWrite(ibt_l_pwm_pin, 0);
         } else if(value < 1000) {
-            pwm = std::min<uint16_t>(255, (1000 - value) * 255 / 1000);
+            pwm = min((uint16_t)255, (uint16_t)((1000 - value) * 255 / 1000));
             digitalWrite(ibt_r_en_pin, HIGH);
             digitalWrite(ibt_l_en_pin, HIGH);
             analogWrite(ibt_r_pwm_pin, 0);
