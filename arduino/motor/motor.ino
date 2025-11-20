@@ -107,6 +107,7 @@ PWR+             VIN
 #include <stdint.h>
 #include <stdarg.h>
 #include <HardwareSerial.h>
+#include <algorithm>
 
 #include <avr/wdt.h>
 #include <avr/sleep.h>
@@ -569,13 +570,13 @@ void position(uint16_t value)
         // value 0..2000, 1000 neutral
         uint8_t pwm = 0;
         if(value > 1000) {
-            pwm = min<uint16_t>(255, (value - 1000) * 255 / 1000);
+            pwm = std::min<uint16_t>(255, (value - 1000) * 255 / 1000);
             digitalWrite(ibt_r_en_pin, HIGH);
             digitalWrite(ibt_l_en_pin, HIGH);
             analogWrite(ibt_r_pwm_pin, pwm);
             analogWrite(ibt_l_pwm_pin, 0);
         } else if(value < 1000) {
-            pwm = min<uint16_t>(255, (1000 - value) * 255 / 1000);
+            pwm = std::min<uint16_t>(255, (1000 - value) * 255 / 1000);
             digitalWrite(ibt_r_en_pin, HIGH);
             digitalWrite(ibt_l_en_pin, HIGH);
             analogWrite(ibt_r_pwm_pin, 0);
@@ -749,6 +750,7 @@ void detach()
     TIMSK1 = 0;
     TCCR1A=0;
     TCCR1B=0;
+#ifndef IBT2_ANDRE_BUILD
     if(pwm_style && pwm_style != 4) {
         while(digitalRead(pwm_output_pin)); // wait for end of pwm if pulse is high
         if(pwm_style == 2) {
@@ -762,7 +764,9 @@ void detach()
         a_bottom_off;
         b_top_off;
         b_bottom_off;
-    } else {
+    } else
+#endif
+    {
         analogWrite(ibt_r_pwm_pin, 0);
         analogWrite(ibt_l_pwm_pin, 0);
         digitalWrite(ibt_r_en_pin, LOW);
@@ -804,6 +808,7 @@ void engage()
         analogWrite(ibt_r_pwm_pin, 0);
         analogWrite(ibt_l_pwm_pin, 0);
     }
+#ifndef IBT2_ANDRE_BUILD
     else if(pwm_style == 1) {
         TCNT1 = 0x1fff;
         //Configure TIMER1
@@ -850,6 +855,7 @@ void engage()
         pinMode(hbridge_a_top_pin, OUTPUT);
         pinMode(hbridge_b_top_pin, OUTPUT);
     }
+#endif
 
     position(1000);
     if(pwm_style != 4) {
