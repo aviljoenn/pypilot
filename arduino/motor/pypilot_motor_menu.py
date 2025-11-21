@@ -206,6 +206,10 @@ def reader_thread(port: serial.Serial) -> None:
         if not data:
             continue
 
+        # NEW: show raw bytes as they arrive
+        with print_lock:
+            print(f"[RAW RX] {data.hex()}")
+
         buf.extend(data)
 
         # Sliding 4-byte window to find valid frames
