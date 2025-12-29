@@ -14,6 +14,10 @@ const uint8_t PIN_RPWM   = 2;   // D2 -> RPWM (ON/OFF)
 const uint8_t PIN_LPWM   = 3;   // D3 -> LPWM (ON/OFF)
 const uint8_t PIN_EN     = 9;   // D9 -> R_EN + L_EN bridged
 
+// PTM button and Buzzer
+const uint8_t PIN_PTM    = 4;   // D4 -> PTM push-button (to GND, use INPUT_PULLUP)
+const uint8_t PIN_BUZZER = 10;  // D10 -> buzzer transistor base via resistor
+
 // Clutch (your hardware: HIGH = engaged):
 const uint8_t PIN_CLUTCH = 11;  // D11 -> clutch driver input
 
@@ -326,6 +330,11 @@ void setup() {
   pinMode(PIN_LPWM, OUTPUT);
   pinMode(PIN_CLUTCH, OUTPUT);
 
+  // PTM + Buzzer
+  pinMode(PIN_PTM, INPUT_PULLUP);  // button to GND
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);   // buzzer off
+
   clutch_off();
   motor_off_hard();
 
@@ -429,4 +438,10 @@ void loop() {
     last_draw = now;
     oled_draw();
   }
+
+  // PTM + buzzer test: buzzer on while PTM is pressed
+  bool ptm_pressed = (digitalRead(PIN_PTM) == LOW);  // button to GND
+  digitalWrite(PIN_BUZZER, ptm_pressed ? HIGH : LOW);
+
 }
+
