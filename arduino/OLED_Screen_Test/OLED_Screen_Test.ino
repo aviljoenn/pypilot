@@ -41,11 +41,11 @@ const uint8_t PIN_PI_VSENSE = A3;
 // Scale ADC reading (0–1023) to Pi 5V voltage:
 //   V_pi = V_adc * PI_VSENSE_SCALE
 // Example: if divider halves 5V to ~2.5V -> scale ≈ 2.0
-const float PI_VSENSE_SCALE = 2.00f;  // <-- tune this to your divider
+const float PI_VSENSE_SCALE = 5.34f;  // <-- tune this to your divider
 
 // Fault thresholds:
-const float PI_VOLT_HIGH_FAULT = 5.30f; // over-voltage fault
-const float PI_VOLT_LOW_FAULT  = 4.70f; // under-voltage fault
+const float PI_VOLT_HIGH_FAULT = 5.40f; // over-voltage fault
+const float PI_VOLT_LOW_FAULT  = 4.80f; // under-voltage fault
 
 float pi_voltage_v       = 0.0f;
 bool  pi_overvolt_fault  = false;
@@ -510,3 +510,4 @@ void loop() {
     oled_draw();
   }
 }
+
