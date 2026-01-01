@@ -39,6 +39,8 @@ const unsigned long STALL_TIMEOUT_MS = 700;
 const unsigned long DISPLAY_PERIOD_MS = 200;
 const unsigned long TELEMETRY_PERIOD_MS = 250;
 const unsigned long PTM_HOLD_MS = 3000;
+const unsigned long PTM_DEBOUNCE_MS = 30;
+const unsigned long ERROR_SCROLL_PERIOD_MS = 150;
 
 // ==============================
 // State
@@ -64,8 +66,12 @@ bool limit_b_valid = false;
 unsigned long last_display_ms = 0;
 unsigned long last_telemetry_ms = 0;
 unsigned long ptm_press_start_ms = 0;
+unsigned long error_scroll_last_ms = 0;
+uint16_t error_scroll_offset = 0;
 
 String last_event = "";
+String error_scroll_text = "";
+String last_error_event = "";
 
 // ==============================
 // Motor and clutch helpers
@@ -164,9 +170,16 @@ void update_display(uint16_t reading) {
   display.print(F("Center: "));
   display.print(center_target);
 
-  display.setCursor(0, 50);
-  display.print(F("Event: "));
-  display.print(last_event);
+  if (run_state == ERROR) {
+    int16_t text_width = (int16_t)error_scroll_text.length() * 6;
+    int16_t scroll_x = SCREEN_WIDTH - (int16_t)error_scroll_offset;
+    display.setCursor(scroll_x, 56);
+    display.print(error_scroll_text);
+  } else {
+    display.setCursor(0, 50);
+    display.print(F("Event: "));
+    display.print(last_event);
+  }
 
   display.display();
 }
@@ -221,7 +234,18 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   uint16_t reading = read_rudder();
-  bool ptm_pressed = (digitalRead(PIN_PTM) == LOW);
+  static bool ptm_stable_pressed = false;
+  static bool ptm_last_raw = false;
+  static unsigned long ptm_last_change_ms = 0;
+  bool ptm_raw_pressed = (digitalRead(PIN_PTM) == LOW);
+  if (ptm_raw_pressed != ptm_last_raw) {
+    ptm_last_raw = ptm_raw_pressed;
+    ptm_last_change_ms = now;
+  }
+  if (now - ptm_last_change_ms >= PTM_DEBOUNCE_MS) {
+    ptm_stable_pressed = ptm_raw_pressed;
+  }
+  bool ptm_pressed = ptm_stable_pressed;
 
   while (Serial.available() > 0) {
     Serial.read();
@@ -333,6 +357,32 @@ void loop() {
     if (reading > max_reading) {
       max_reading = reading;
     }
+  }
+
+  if (run_state == ERROR) {
+    if (last_event != last_error_event) {
+      error_scroll_text = "Error: " + last_event + " ";
+      error_scroll_offset = 0;
+      last_error_event = last_event;
+      error_scroll_last_ms = now;
+    }
+    if (now - error_scroll_last_ms >= ERROR_SCROLL_PERIOD_MS) {
+      error_scroll_last_ms = now;
+      int16_t text_width = (int16_t)error_scroll_text.length() * 6;
+      uint16_t scroll_width = (uint16_t)(text_width + SCREEN_WIDTH);
+      if (scroll_width == 0) {
+        error_scroll_offset = 0;
+      } else {
+        error_scroll_offset++;
+        if (error_scroll_offset > scroll_width) {
+          error_scroll_offset = 0;
+        }
+      }
+    }
+  } else {
+    last_error_event = "";
+    error_scroll_text = "";
+    error_scroll_offset = 0;
   }
 
   if (oled_ok && (now - last_display_ms >= DISPLAY_PERIOD_MS)) {
