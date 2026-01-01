@@ -69,6 +69,9 @@ unsigned long last_telemetry_ms = 0;
 unsigned long ptm_press_start_ms = 0;
 unsigned long error_scroll_last_ms = 0;
 uint16_t error_scroll_offset = 0;
+bool stall_retry_active = false;
+MotionState stall_retry_motion = STOPPED;
+uint16_t stall_retry_reading = 0;
 
 String last_event = "";
 String error_scroll_text = "";
@@ -276,6 +279,7 @@ void loop() {
       run_state = FIND_LIMIT_A;
       last_change_ms = now;
       last_reading = reading;
+      stall_retry_active = false;
       ptm_press_start_ms = 0;
       ptm_stop_armed = false;
     }
@@ -293,11 +297,13 @@ void loop() {
     if ((uint16_t)abs((int)reading - (int)last_reading) >= CHANGE_THRESHOLD) {
       last_change_ms = now;
       last_reading = reading;
+      stall_retry_active = false;
     }
   } else {
     last_reading = reading;
     last_reading_valid = true;
     last_change_ms = now;
+    stall_retry_active = false;
   }
 
   bool at_limit_value = (reading <= (RUDDER_MIN_LIMIT + LIMIT_TOLERANCE) ||
@@ -305,9 +311,29 @@ void loop() {
   bool stalled = (motion != STOPPED) && (now - last_change_ms > STALL_TIMEOUT_MS);
   bool limit_reached = (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B) && at_limit_value;
 
-  if (motion != STOPPED && (limit_reached || stalled)) {
+  if (motion != STOPPED && stalled) {
     motor_stop();
-    last_event = limit_reached ? "LIMIT" : "STALL";
+    last_event = "STALL";
+
+    if (stall_retry_active && stall_retry_motion != motion &&
+        (uint16_t)abs((int)reading - (int)stall_retry_reading) < CHANGE_THRESHOLD) {
+      run_state = ERROR;
+      clutch_off();
+    } else {
+      stall_retry_active = true;
+      stall_retry_motion = motion;
+      stall_retry_reading = reading;
+      if (motion == MOVING_NEG) {
+        motor_move_positive();
+      } else if (motion == MOVING_POS) {
+        motor_move_negative();
+      }
+      last_change_ms = now;
+      last_reading = reading;
+    }
+  } else if (motion != STOPPED && limit_reached) {
+    motor_stop();
+    last_event = "LIMIT";
 
     if (run_state == FIND_LIMIT_A) {
       limit_a = reading;
@@ -333,10 +359,17 @@ void loop() {
       }
       last_change_ms = now;
       last_reading = reading;
-    } else if (run_state == CENTERING) {
-      run_state = ERROR;
-      clutch_off();
     }
+  } else if (motion != STOPPED && run_state == CENTERING && at_limit_value) {
+    motor_stop();
+    last_event = "LIMIT";
+    if (motion == MOVING_NEG) {
+      motor_move_positive();
+    } else if (motion == MOVING_POS) {
+      motor_move_negative();
+    }
+    last_change_ms = now;
+    last_reading = reading;
   }
 
   if (run_state == CENTERING && motion != STOPPED) {
