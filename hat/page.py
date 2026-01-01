@@ -520,6 +520,12 @@ class control(controlbase):
         self.ap_heading_command = 0
         self.resetmanualkeystate()
         self.tack_hint = 0, ''
+        self.error_scroll_message = ''
+        self.error_scroll_start = 0
+        self.error_scroll_width = 0
+        self.error_scroll_height = 0
+        self.error_scroll_size = 0
+        self.error_scroll_speed = 20
 
     def get_ap_heading_command(self):
         if gettime() - self.ap_heading_command_time < 5:
@@ -591,6 +597,45 @@ class control(controlbase):
         r = modes_r[rindex]
         self.rectangle(rectangle(r.x, r.y+marg, r.width, r.height), .015)
 
+    def draw_error_scroll(self, message, refresh):
+        if message != self.error_scroll_message or refresh:
+            self.error_scroll_message = message
+            self.error_scroll_start = gettime()
+            self.error_scroll_width = 0
+            self.error_scroll_height = 0
+            self.error_scroll_size = 0
+
+        if not message:
+            return
+
+        rect = rectangle(0, .92, 1, .08)
+        surface = self.lcd.surface
+        self.box(rect, black)
+        metric_size = 16
+        bw = self.lcd.bw
+        if self.error_scroll_size == 0:
+            text_width, text_height = font.draw(surface, False, message, metric_size, bw)
+            if text_height == 0:
+                return
+            size = int(surface.height * rect.height / text_height * metric_size)
+            size = max(8, size)
+            scale = size / float(metric_size)
+            self.error_scroll_size = size
+            self.error_scroll_width = int(text_width * scale)
+            self.error_scroll_height = int(text_height * scale)
+
+        gap = max(10, int(surface.width * 0.2))
+        total = self.error_scroll_width + gap
+        if total <= 0:
+            return
+
+        elapsed = gettime() - self.error_scroll_start
+        offset = int(elapsed * self.error_scroll_speed) % total
+        y = int(rect.y * surface.height + (rect.height * surface.height - self.error_scroll_height) / 2)
+        x_start = int(rect.x * surface.width) - offset
+        font.draw(surface, (x_start, y), message, self.error_scroll_size, bw)
+        font.draw(surface, (x_start + total, y), message, self.error_scroll_size, bw)
+
     def display(self, refresh):
         if not self.control:
             self.control = {'heading': False,
@@ -649,13 +694,17 @@ class control(controlbase):
                 elif heading < 0:
                     self.box(rectangle(0, pos+.3, .3, .025), white)
 
+        error_message = ''
         frequency = self.last_val('imu.frequency', 1, None)
         if frequency is False:
             r = rectangle(0, 0, 1, .8)
             self.fittext(r, _('ERROR') + '\n' + _('compass or gyro failure!'), True, black)
             self.control['heading'] = 'no imu'
             self.control['heading_command'] = 'no imu'
-            super(control, self).display(refresh)
+            error_message = _('compass or gyro failure!')
+            error_changed = error_message != self.error_scroll_message
+            super(control, self).display(refresh or error_changed)
+            self.draw_error_scroll(error_message, refresh or error_changed)
             return
 
         t0 = gettime()
@@ -692,24 +741,29 @@ class control(controlbase):
                 self.fittext(rectangle(0, .4, 1, .5), _(warning), True, black)
                 self.control['heading_command'] = warning
                 self.control['mode'] = warning
+            error_message = warning
         elif mode not in modes:
             no_mode = 'no ' + mode
             if self.control['heading_command'] != no_mode:
                 self.fittext(rectangle(0, .4, 1, .35), mode.upper() + ' ' + _('not detected'), True, black)
                 self.control['heading_command'] = no_mode
+            error_message = mode.upper() + ' ' + _('not detected')
         elif self.last_val('imu.error', default=None):
             if self.control['heading_command'] != 'imu error':
                 self.fittext(rectangle(0, .4, 1, .35), self.last_val('imu.error'), True, black)
                 self.control['heading_command'] = 'imu error'
+            error_message = self.last_val('imu.error')
         elif self.last_val('servo.controller') == 'none':
             if self.control['heading_command'] != 'no controller':
                 self.fittext(rectangle(0, .4, 1, .35), _('WARNING no motor controller'), True, black)
                 self.control['heading_command'] = 'no controller'
+            error_message = _('WARNING no motor controller')
         elif self.lcd.check_voltage():
             msg = self.lcd.check_voltage()
             if self.control['heading_command'] != msg:
                 self.fittext(rectangle(0, .4, 1, .35), msg, True, black)
                 self.control['heading_command'] = msg
+            error_message = msg
         elif self.last_val('ap.enabled') != True and \
              self.last_val('servo.controller', default=None):
             # no warning, display the desired course or 'standby'
@@ -753,7 +807,12 @@ class control(controlbase):
                 warning = True
         if not warning:
             self.display_mode()
-        super(control, self).display(refresh)
+        error_changed = error_message != self.error_scroll_message
+        super(control, self).display(refresh or error_changed)
+        if error_message:
+            self.draw_error_scroll(error_message, refresh or error_changed)
+        elif error_changed:
+            self.draw_error_scroll('', True)
 
     def process(self):
         if not self.lcd.client.connection:

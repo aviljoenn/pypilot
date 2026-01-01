@@ -232,6 +232,7 @@ class MaxRangeSetting(RangeSetting):
 class Servo(object):
     pypilot_dir = os.getenv('HOME') + '/.pypilot/'
     calibration_filename = pypilot_dir + 'servocalibration'
+    RUDDER_FAULT_TOLERANCE = 5
 
     def __init__(self, client, sensors):
         self.client = client
@@ -685,7 +686,8 @@ class Servo(object):
             # to prevent rudder movement
             angle = self.sensors.rudder.angle.value
             if angle: # note, this is ok here for both False and 0
-                if abs(angle) > self.sensors.rudder.range.value:
+                rudder_limit = self.sensors.rudder.range.value + self.RUDDER_FAULT_TOLERANCE
+                if abs(angle) > rudder_limit:
                     if angle > 0:
                         flags |= ServoFlags.MAX_RUDDER_FAULT
                     else:
