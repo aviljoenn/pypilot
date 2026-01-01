@@ -11,6 +11,7 @@ const uint8_t PIN_RPWM   = 2;   // D2 -> RPWM (ON/OFF)
 const uint8_t PIN_LPWM   = 3;   // D3 -> LPWM (ON/OFF)
 const uint8_t PIN_EN     = 9;   // D9 -> R_EN + L_EN bridged
 const uint8_t PIN_CLUTCH = 11;  // D11 -> clutch driver input
+const uint8_t PIN_PTM    = 4;   // D4 -> PTM push-button (to GND, INPUT_PULLUP)
 
 // Rudder position sensor
 const uint8_t PIN_RUDDER = A2;  // potentiometer feedback input
@@ -37,15 +38,16 @@ const uint16_t CENTER_TOLERANCE = 2;    // stop within +/- this value
 const unsigned long STALL_TIMEOUT_MS = 700;
 const unsigned long DISPLAY_PERIOD_MS = 200;
 const unsigned long TELEMETRY_PERIOD_MS = 250;
+const unsigned long PTM_HOLD_MS = 3000;
 
 // ==============================
 // State
 // ==============================
 enum MotionState : uint8_t { STOPPED = 0, MOVING_NEG = 1, MOVING_POS = 2 };
-enum RunState : uint8_t { FIND_MIN = 0, FIND_MAX = 1, CENTERING = 2, DONE = 3, ERROR = 4 };
+enum RunState : uint8_t { WAIT_START = 0, FIND_LIMIT_A = 1, FIND_LIMIT_B = 2, CENTERING = 3, DONE = 4, ERROR = 5 };
 
 MotionState motion = STOPPED;
-RunState run_state = FIND_MIN;
+RunState run_state = WAIT_START;
 
 uint16_t last_reading = 0;
 unsigned long last_change_ms = 0;
@@ -54,9 +56,14 @@ bool last_reading_valid = false;
 uint16_t min_reading = 1023;
 uint16_t max_reading = 0;
 uint16_t center_target = 512;
+uint16_t limit_a = 0;
+uint16_t limit_b = 0;
+bool limit_a_valid = false;
+bool limit_b_valid = false;
 
 unsigned long last_display_ms = 0;
 unsigned long last_telemetry_ms = 0;
+unsigned long ptm_press_start_ms = 0;
 
 String last_event = "";
 
@@ -117,8 +124,9 @@ const __FlashStringHelper *motion_str(MotionState m) {
 
 const __FlashStringHelper *state_str(RunState s) {
   switch (s) {
-    case FIND_MIN:  return F("FIND MIN");
-    case FIND_MAX:  return F("FIND MAX");
+    case WAIT_START: return F("WAIT PTM");
+    case FIND_LIMIT_A: return F("FIND A");
+    case FIND_LIMIT_B: return F("FIND B");
     case CENTERING: return F("CENTER");
     case DONE:      return F("DONE");
     default:        return F("ERROR");
@@ -191,9 +199,10 @@ void setup() {
   pinMode(PIN_EN, OUTPUT);
   pinMode(PIN_CLUTCH, OUTPUT);
   pinMode(PIN_RUDDER, INPUT);
+  pinMode(PIN_PTM, INPUT_PULLUP);
 
   motor_stop();
-  clutch_on();
+  clutch_off();
 
   oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
@@ -206,17 +215,47 @@ void setup() {
   last_reading = reading;
   last_reading_valid = true;
   last_change_ms = millis();
-
-  motor_move_negative();
-  run_state = FIND_MIN;
+  run_state = WAIT_START;
 }
 
 void loop() {
   unsigned long now = millis();
   uint16_t reading = read_rudder();
+  bool ptm_pressed = (digitalRead(PIN_PTM) == LOW);
 
   while (Serial.available() > 0) {
     Serial.read();
+  }
+
+  if (ptm_pressed) {
+    if (ptm_press_start_ms == 0) {
+      ptm_press_start_ms = now;
+    }
+  } else {
+    ptm_press_start_ms = 0;
+  }
+
+  if (run_state == WAIT_START) {
+    if (ptm_press_start_ms > 0 && (now - ptm_press_start_ms >= PTM_HOLD_MS)) {
+      last_event = "START";
+      limit_a_valid = false;
+      limit_b_valid = false;
+      min_reading = 1023;
+      max_reading = 0;
+      clutch_on();
+      motor_move_negative();
+      run_state = FIND_LIMIT_A;
+      last_change_ms = now;
+      last_reading = reading;
+      ptm_press_start_ms = 0;
+    }
+  }
+
+  if ((run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B || run_state == CENTERING) && ptm_pressed) {
+    motor_stop();
+    clutch_off();
+    run_state = ERROR;
+    last_event = "PTM_STOP";
   }
 
   if (last_reading_valid) {
@@ -237,14 +276,18 @@ void loop() {
     motor_stop();
     last_event = at_limit_value ? "LIMIT" : "STALL";
 
-    if (run_state == FIND_MIN) {
-      min_reading = reading;
-      run_state = FIND_MAX;
+    if (run_state == FIND_LIMIT_A) {
+      limit_a = reading;
+      limit_a_valid = true;
+      run_state = FIND_LIMIT_B;
       motor_move_positive();
       last_change_ms = now;
       last_reading = reading;
-    } else if (run_state == FIND_MAX) {
-      max_reading = reading;
+    } else if (run_state == FIND_LIMIT_B) {
+      limit_b = reading;
+      limit_b_valid = true;
+      min_reading = min(limit_a, limit_b);
+      max_reading = max(limit_a, limit_b);
       center_target = (uint16_t)((min_reading + max_reading) / 2);
       run_state = CENTERING;
       if (reading > center_target) {
@@ -283,11 +326,10 @@ void loop() {
     last_reading = reading;
   }
 
-  if (run_state == FIND_MIN) {
+  if (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B || run_state == CENTERING) {
     if (reading < min_reading) {
       min_reading = reading;
     }
-  } else if (run_state == FIND_MAX) {
     if (reading > max_reading) {
       max_reading = reading;
     }
