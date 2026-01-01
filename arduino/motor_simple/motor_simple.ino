@@ -559,7 +559,21 @@ void loop() {
     pi_fault_alarm_silenced = true;
   }
 
-  if (pi_fault && !pi_fault_alarm_silenced) {
+  if (ptm_edge) {
+    flags &= ~ENGAGED;
+    last_command_val = 1000;
+  }
+
+  bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
+  if (temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
+    flags |= OVERTEMP_FAULT;
+  } else {
+    flags &= ~OVERTEMP_FAULT;
+  }
+
+  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
+  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
+  if (alarm_active && !alarm_silenced) {
     static unsigned long buzz_last = 0;
     static bool buzz_on = false;
     unsigned long period = buzz_on ? 500UL : 250UL;
@@ -576,13 +590,6 @@ void loop() {
     flags |= BADVOLTAGE_FAULT;
   } else {
     flags &= ~BADVOLTAGE_FAULT;
-  }
-
-  bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
-  if (temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
-    flags |= OVERTEMP_FAULT;
-  } else {
-    flags &= ~OVERTEMP_FAULT;
   }
 
   if ((flags & OVERTEMP_FAULT) || pi_fault) {
