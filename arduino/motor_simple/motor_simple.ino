@@ -23,6 +23,7 @@ const uint8_t LED_PIN          = 13;
 const uint8_t RUDDER_PIN       = A2;
 
 const uint8_t PTM_PIN          = 4;
+const unsigned long PTM_DEBOUNCE_MS = 30;
 const uint8_t BUZZER_PIN       = 10;
 
 const uint8_t PIN_DS18B20      = 12;
@@ -551,9 +552,19 @@ void loop() {
   }
 
   static bool ptm_prev = false;
-  bool ptm_pressed = (digitalRead(PTM_PIN) == LOW);
-  bool ptm_edge = ptm_pressed && !ptm_prev;
-  ptm_prev = ptm_pressed;
+  static bool ptm_stable_pressed = false;
+  static bool ptm_last_raw = false;
+  static unsigned long ptm_last_change_ms = 0;
+  bool ptm_raw_pressed = (digitalRead(PTM_PIN) == LOW);
+  if (ptm_raw_pressed != ptm_last_raw) {
+    ptm_last_raw = ptm_raw_pressed;
+    ptm_last_change_ms = now;
+  }
+  if (now - ptm_last_change_ms >= PTM_DEBOUNCE_MS) {
+    ptm_stable_pressed = ptm_raw_pressed;
+  }
+  bool ptm_edge = ptm_stable_pressed && !ptm_prev;
+  ptm_prev = ptm_stable_pressed;
 
   if (ptm_edge && pi_fault) {
     pi_fault_alarm_silenced = true;

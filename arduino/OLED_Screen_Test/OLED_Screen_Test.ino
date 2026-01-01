@@ -24,6 +24,7 @@ const uint8_t PIN_CLUTCH = 11;  // D11 -> clutch driver input
 // PTM button and Buzzer:
 const uint8_t PIN_PTM    = 4;   // D4 -> PTM push-button (to GND, INPUT_PULLUP)
 const uint8_t PIN_BUZZER = 10;  // D10 -> buzzer transistor base via resistor
+const unsigned long PTM_DEBOUNCE_MS = 30;
 
 // DS18B20 temperature sensor:
 const uint8_t PIN_DS18B20 = 12; // D12 -> DS18B20 DQ (with 4.7k pull-up to 5V)
@@ -415,9 +416,19 @@ void loop() {
 
   // --- PTM handling with fault ack ---
   static bool ptm_prev = false;
-  bool ptm_pressed = (digitalRead(PIN_PTM) == LOW); // button to GND
-  bool ptm_edge    = ptm_pressed && !ptm_prev;
-  ptm_prev = ptm_pressed;
+  static bool ptm_stable_pressed = false;
+  static bool ptm_last_raw = false;
+  static unsigned long ptm_last_change_ms = 0;
+  bool ptm_raw_pressed = (digitalRead(PIN_PTM) == LOW); // button to GND
+  if (ptm_raw_pressed != ptm_last_raw) {
+    ptm_last_raw = ptm_raw_pressed;
+    ptm_last_change_ms = now;
+  }
+  if (now - ptm_last_change_ms >= PTM_DEBOUNCE_MS) {
+    ptm_stable_pressed = ptm_raw_pressed;
+  }
+  bool ptm_edge    = ptm_stable_pressed && !ptm_prev;
+  ptm_prev = ptm_stable_pressed;
 
   if (ptm_edge && pi_fault) {
     motor_off_hard();
