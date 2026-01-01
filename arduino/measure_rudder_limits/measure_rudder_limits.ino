@@ -33,7 +33,7 @@ bool oled_ok = false;
 const uint16_t RUDDER_MIN_LIMIT = 0;
 const uint16_t RUDDER_MAX_LIMIT = 1023;
 const uint8_t ADC_SAMPLES = 8;
-const uint8_t CHANGE_THRESHOLD = 1;     // minimum delta to consider movement
+const uint8_t CHANGE_THRESHOLD = 4;     // minimum delta to consider movement
 const uint16_t CENTER_TOLERANCE = 2;    // stop within +/- this value
 const unsigned long STALL_TIMEOUT_MS = 700;
 const unsigned long DISPLAY_PERIOD_MS = 200;
@@ -309,37 +309,45 @@ void loop() {
   bool at_limit_value = (reading <= (RUDDER_MIN_LIMIT + LIMIT_TOLERANCE) ||
                          reading >= (RUDDER_MAX_LIMIT - LIMIT_TOLERANCE));
   bool stalled = (motion != STOPPED) && (now - last_change_ms > STALL_TIMEOUT_MS);
-  bool limit_reached = (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B) && at_limit_value;
 
-  if (motion != STOPPED && stalled) {
+  // While searching for limits, treat "stall" as a limit event.
+  bool searching = (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B);
+  bool limit_reached = searching && (at_limit_value || stalled);
+
+  if (motion != STOPPED && stalled && !searching) {
+    MotionState prev_motion = motion;   // capture BEFORE motor_stop() clears it
     motor_stop();
     last_event = "STALL";
 
-    if (stall_retry_active && stall_retry_motion != motion &&
+    if (stall_retry_active && stall_retry_motion != prev_motion &&
         (uint16_t)abs((int)reading - (int)stall_retry_reading) < CHANGE_THRESHOLD) {
       run_state = ERROR;
       clutch_off();
     } else {
       stall_retry_active = true;
-      stall_retry_motion = motion;
+      stall_retry_motion = prev_motion;
       stall_retry_reading = reading;
-      if (motion == MOVING_NEG) {
+
+      if (prev_motion == MOVING_NEG) {
         motor_move_positive();
-      } else if (motion == MOVING_POS) {
+      } else if (prev_motion == MOVING_POS) {
         motor_move_negative();
       }
+
       last_change_ms = now;
       last_reading = reading;
     }
   } else if (motion != STOPPED && limit_reached) {
     motor_stop();
-    last_event = "LIMIT";
+    stall_retry_active = false;   // <-- add this (covers A + B)
+    last_event = at_limit_value ? "LIMIT_ADC" : "LIMIT_STALL";
 
     if (run_state == FIND_LIMIT_A) {
       limit_a = reading;
       limit_a_valid = true;
       run_state = FIND_LIMIT_B;
       motor_move_positive();
+      stall_retry_active = false;
       last_change_ms = now;
       last_reading = reading;
     } else if (run_state == FIND_LIMIT_B) {
@@ -349,6 +357,7 @@ void loop() {
       max_reading = max(limit_a, limit_b);
       center_target = (uint16_t)((min_reading + max_reading) / 2);
       run_state = CENTERING;
+
       if (reading > center_target) {
         motor_move_negative();
       } else if (reading < center_target) {
@@ -357,17 +366,21 @@ void loop() {
         run_state = DONE;
         clutch_off();
       }
+
       last_change_ms = now;
       last_reading = reading;
     }
   } else if (motion != STOPPED && run_state == CENTERING && at_limit_value) {
+    MotionState prev_motion = motion;   // capture BEFORE motor_stop() clears it
     motor_stop();
     last_event = "LIMIT";
-    if (motion == MOVING_NEG) {
+
+    if (prev_motion == MOVING_NEG) {
       motor_move_positive();
-    } else if (motion == MOVING_POS) {
+    } else if (prev_motion == MOVING_POS) {
       motor_move_negative();
     }
+
     last_change_ms = now;
     last_reading = reading;
   }
