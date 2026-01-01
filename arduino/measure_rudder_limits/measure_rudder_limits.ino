@@ -237,6 +237,7 @@ void loop() {
   static bool ptm_stable_pressed = false;
   static bool ptm_last_raw = false;
   static unsigned long ptm_last_change_ms = 0;
+  static bool ptm_stop_armed = true;
   bool ptm_raw_pressed = (digitalRead(PIN_PTM) == LOW);
   if (ptm_raw_pressed != ptm_last_raw) {
     ptm_last_raw = ptm_raw_pressed;
@@ -246,6 +247,9 @@ void loop() {
     ptm_stable_pressed = ptm_raw_pressed;
   }
   bool ptm_pressed = ptm_stable_pressed;
+  if (!ptm_pressed) {
+    ptm_stop_armed = true;
+  }
 
   while (Serial.available() > 0) {
     Serial.read();
@@ -272,10 +276,12 @@ void loop() {
       last_change_ms = now;
       last_reading = reading;
       ptm_press_start_ms = 0;
+      ptm_stop_armed = false;
     }
   }
 
-  if ((run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B || run_state == CENTERING) && ptm_pressed) {
+  if ((run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B || run_state == CENTERING) &&
+      ptm_pressed && ptm_stop_armed) {
     motor_stop();
     clutch_off();
     run_state = ERROR;
