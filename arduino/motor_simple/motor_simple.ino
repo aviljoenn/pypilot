@@ -44,13 +44,17 @@ const uint8_t CLUTCH_PIN       = 11;
 const uint8_t PORT_LIMIT_PIN   = 7;
 const uint8_t STBD_LIMIT_PIN   = 8;
 
-// ---- Analog measurement calibration ----
-const float ADC_VREF = 5.00f;
-const float VOLTAGE_SCALE = 5.156f;
-const float CURRENT_ZERO_V = 2.10f;
-const float CURRENT_SENS_V_PER_A = 0.049f;
+const float ADC_VREF              = 5.00f;
+const float VOLTAGE_SCALE         = 5.156f;
+
+// Calibrated from OLED debug:
+// @ 0 A  : V = 2.072
+// @ 2.2 A: V = 2.033
+const float CURRENT_ZERO_V        = 2.072f;  // zero-current sensor voltage
+const float CURRENT_SENS_V_PER_A  = 0.0177f; // ~17.7 mV per Amp
 const bool  CURRENT_V_DROPS_WITH_A = true;
-const uint8_t ADC_SAMPLES = 16;
+
+const uint8_t ADC_SAMPLES         = 16;
 
 
 const float PI_VSENSE_SCALE = 5.25f;
@@ -723,6 +727,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
