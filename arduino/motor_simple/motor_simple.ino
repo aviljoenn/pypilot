@@ -48,7 +48,7 @@ const uint8_t STBD_LIMIT_PIN   = 8;
 const float ADC_VREF = 5.00f;
 const float VOLTAGE_SCALE = 5.156f;
 const float CURRENT_ZERO_V = 2.10f;
-const float CURRENT_SENS_V_PER_A = 0.484f;
+const float CURRENT_SENS_V_PER_A = 0.0484f;
 const bool  CURRENT_V_DROPS_WITH_A = true;
 const uint8_t ADC_SAMPLES = 16;
 
@@ -711,5 +711,6 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
