@@ -270,7 +270,7 @@ void oled_draw() {
   char vbuf[12], ibuf[12];
 
   dtostrf(vin, 0, 1, vnum);
-  dtostrf(ia,  0, 1, inum);
+  dtostrf(ia,  0, 2, inum);
 
   strncpy(vbuf, vnum, sizeof(vbuf));
   vbuf[sizeof(vbuf) - 1] = '\0';
@@ -711,3 +711,4 @@ void loop() {
     oled_draw();
   }
 }
+
