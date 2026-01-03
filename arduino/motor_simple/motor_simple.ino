@@ -52,6 +52,7 @@ const float CURRENT_SENS_V_PER_A = 0.049f;
 const bool  CURRENT_V_DROPS_WITH_A = true;
 const uint8_t ADC_SAMPLES = 16;
 
+
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
@@ -153,6 +154,9 @@ unsigned long temp_req_ms = 0;
 float current_ema_a = 0.0f;
 bool  current_ema_init = false;
 const float CURRENT_EMA_ALPHA = 0.20f;
+// ---- Current sensor debug (for calibration) ----
+uint16_t current_debug_adc = 0;
+float    current_debug_v   = 0.0f;
 
 // ---- Telemetry timing ----
 unsigned long last_flags_ms  = 0;
@@ -200,11 +204,9 @@ float read_current_a() {
   uint16_t adc = read_adc_avg(PIN_CURRENT, ADC_SAMPLES);
   float v = adc_to_volts(adc);
 
-  // DEBUG: dump raw sensor reading to serial
-  Serial.print("CURRENT ADC=");
-  Serial.print(adc);
-  Serial.print("  V=");
-  Serial.println(v, 4);
+  // DEBUG: capture raw current sensor reading
+  current_debug_adc = adc;
+  current_debug_v   = v;
 
   float delta = v - CURRENT_ZERO_V;
   if (CURRENT_V_DROPS_WITH_A) {
@@ -328,11 +330,14 @@ void oled_draw() {
   display.print(pi_voltage_v, 2);
   display.println(F("V"));
 
-  // NEW: show raw ADC for button ladder on A6
-  int btn_adc = analogRead(BUTTON_ADC_PIN);  // 0..1023
+  // DEBUG: show current sensor raw ADC and voltage
   display.setCursor(0, 52);
-  display.print(F("Btn ADC: "));
-  display.print(btn_adc);
+  display.print(F("CurADC: "));
+  display.print(current_debug_adc);
+
+  display.setCursor(70, 52);   // shift right a bit
+  display.print(F("V="));
+  display.print(current_debug_v, 3);  // 3 decimals for sensor voltage
 
   // Right column: main Vin, current, temp
   oled_print_right(0,  vbuf);  // main Vin
@@ -718,6 +723,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
