@@ -351,6 +351,16 @@ void oled_draw() {
   display.print(F("Inno-Pilot "));
   display.print(INNOPILOT_VERSION);
 
+  // Draw again 1px right to fake bold
+  display.setCursor(1, 0);
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
+
+  // Draw again 1px right and lower to fake bold
+  display.setCursor(1, 1);
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
+
   const uint8_t LINE2_Y = 10;   // Y for second logical line
 
   // ----- Online splash (Pi controller online) -----
@@ -854,6 +864,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
