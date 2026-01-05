@@ -169,8 +169,8 @@ enum ButtonID {
   BTN_B1,  // -10 deg
   BTN_B2,  // -1  deg
   BTN_B3,  // AP toggle
-  BTN_B4,  // +10 deg
-  BTN_B5   // +1  deg
+  BTN_B4,  // +1 deg
+  BTN_B5   // +10  deg
 };
 
 // Optional: button event codes to send to Pi via servo protocol
@@ -243,8 +243,8 @@ ButtonID decode_button_from_adc(int adc) {
   // These thresholds are starting guesses. You'll tune them based on real ADC values.
   // NONE: high ADC, buttons bring it down in steps.
   if (adc > 865) return BTN_NONE;
-  if (adc > 608) return BTN_B5;  // +1 deg
-  if (adc > 419) return BTN_B4;  // +10 deg
+  if (adc > 608) return BTN_B5;  // +10 deg
+  if (adc > 419) return BTN_B4;  // +1 deg
   if (adc > 257) return BTN_B3;  // AP toggle
   if (adc > 139) return BTN_B2;  // -1 deg
   return BTN_B1;                 // -10 deg
@@ -277,13 +277,13 @@ void handle_button(ButtonID b) {
     }
 
     case BTN_B4:  // +10
-      show_overlay("+10");
-      send_button_event(BTN_EVT_PLUS10);
+      show_overlay("+1");
+      send_button_event(BTN_EVT_PLUS1);
       break;
 
     case BTN_B5:  // +1
-      show_overlay("+1");
-      send_button_event(BTN_EVT_PLUS1);
+      show_overlay("+10");
+      send_button_event(BTN_EVT_PLUS10);
       break;
 
     default:
@@ -1027,6 +1027,7 @@ if (stable_b != last_stable_button) {
     oled_draw();
   }
 }
+
 
 
 
