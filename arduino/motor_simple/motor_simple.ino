@@ -163,6 +163,34 @@ enum {
   REBOOTED            = 0x8000
 };
 
+// Button IDs from the A6 resistor ladder
+enum ButtonID {
+  BTN_NONE = 0,
+  BTN_B1,  // -10 deg
+  BTN_B2,  // -1  deg
+  BTN_B3,  // AP toggle
+  BTN_B4,  // +10 deg
+  BTN_B5   // +1  deg
+};
+
+// Optional: button event codes to send to Pi via servo protocol
+const uint8_t BUTTON_EVENT_CODE = 0xE0;  // new result code, must be handled by Pi-side helper
+
+enum ButtonEvent {
+  BTN_EVT_NONE    = 0,
+  BTN_EVT_MINUS10 = 1,
+  BTN_EVT_MINUS1  = 2,
+  BTN_EVT_TOGGLE  = 3,
+  BTN_EVT_PLUS10  = 4,
+  BTN_EVT_PLUS1   = 5
+};
+
+// Overlay for big transient messages (e.g. -10, +1, AP: ON)
+bool overlay_active = false;
+char overlay_text[8] = "";
+unsigned long overlay_start_ms = 0;
+const unsigned long OVERLAY_DURATION_MS = 600UL;  // 0.6s display
+
 // ---- RX state ----
 uint8_t  in_bytes[3];
 uint8_t  sync_b        = 0;
@@ -203,6 +231,65 @@ const unsigned long RUDDER_PERIOD_MS = 200; // 5 Hz
 const unsigned long CURRENT_PERIOD_MS = 200; // 5 Hz
 const unsigned long VOLTAGE_PERIOD_MS = 200; // 5 Hz
 const unsigned long TEMP_PERIOD_SEND_MS = 500; // 2 Hz
+
+void show_overlay(const char *text) {
+  strncpy(overlay_text, text, sizeof(overlay_text));
+  overlay_text[sizeof(overlay_text) - 1] = '\0';
+  overlay_active = true;
+  overlay_start_ms = millis();
+}
+
+ButtonID decode_button_from_adc(int adc) {
+  // These thresholds are starting guesses. You'll tune them based on real ADC values.
+  // NONE: high ADC, buttons bring it down in steps.
+  if (adc > 865) return BTN_NONE;
+  if (adc > 608) return BTN_B5;  // +1 deg
+  if (adc > 419) return BTN_B4;  // +10 deg
+  if (adc > 257) return BTN_B3;  // AP toggle
+  if (adc > 139) return BTN_B2;  // -1 deg
+  return BTN_B1;                 // -10 deg
+}
+
+void send_button_event(uint16_t ev) {
+  // Reuse send_frame(): code=BUTTON_EVENT_CODE, 16-bit value = ev
+  send_frame(BUTTON_EVENT_CODE, ev);
+}
+
+void handle_button(ButtonID b) {
+  if (b == BTN_NONE) return;
+
+  switch (b) {
+    case BTN_B1:  // -10
+      show_overlay("-10");
+      send_button_event(BTN_EVT_MINUS10);
+      break;
+
+    case BTN_B2:  // -1
+      show_overlay("-1");
+      send_button_event(BTN_EVT_MINUS1);
+      break;
+
+    case BTN_B3: { // AP toggle
+      bool engaged = (flags & ENGAGED);
+      show_overlay(engaged ? "AP: OFF" : "AP: ON");
+      send_button_event(BTN_EVT_TOGGLE);
+      break;
+    }
+
+    case BTN_B4:  // +10
+      show_overlay("+10");
+      send_button_event(BTN_EVT_PLUS10);
+      break;
+
+    case BTN_B5:  // +1
+      show_overlay("+1");
+      send_button_event(BTN_EVT_PLUS1);
+      break;
+
+    default:
+      break;
+  }
+}
 
 // Helper: send a 4-byte frame [code, value_lo, value_hi, crc]
 void send_frame(uint8_t code, uint16_t value) {
@@ -360,6 +447,16 @@ void oled_draw() {
   display.print(F("Inno-Pilot "));
   display.print(INNOPILOT_VERSION);
 
+  // draw again 1px right to fake extra-bold
+  display.setCursor(1, 0);
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
+
+  // draw again 1px lower to fake extra-bold
+  display.setCursor(1, 1);
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
+
   const uint8_t LINE2_Y = 10;
 
   // ----- Online splash (Pi just came online) -----
@@ -370,6 +467,29 @@ void oled_draw() {
     display.println(F("On-line..."));
     display.display();
     return;
+  }
+
+    // ----- Overlay: big transient button feedback -----
+  if (overlay_active) {
+    if (now - overlay_start_ms < OVERLAY_DURATION_MS) {
+      // Draw the header (already done above), then big centered text
+      display.setTextSize(3);
+
+      uint8_t len = strlen(overlay_text);
+      int16_t char_w = 6 * 3;  // 6px * size 3
+      int16_t text_w = len * char_w;
+      int16_t x = (SCREEN_WIDTH - text_w) / 2;
+      if (x < 0) x = 0;
+
+      int16_t y = 20;  // somewhere below the header
+      display.setCursor(x, y);
+      display.println(overlay_text);
+
+      display.display();
+      return;
+    } else {
+      overlay_active = false;
+    }
   }
 
   // ----- Booting (Pi never seen yet, within boot window) -----
@@ -750,6 +870,33 @@ void loop() {
     last_command_val = 1000;
   }
 
+  // ----- Button ladder on A6 (B1..B5) -----
+static ButtonID last_stable_button = BTN_NONE;
+static ButtonID last_raw_button    = BTN_NONE;
+static unsigned long btn_last_change_ms = 0;
+const unsigned long BUTTON_DEBOUNCE_MS = 60UL;
+
+int btn_adc = analogRead(BUTTON_ADC_PIN);
+ButtonID raw_b = decode_button_from_adc(btn_adc);
+
+if (raw_b != last_raw_button) {
+  last_raw_button = raw_b;
+  btn_last_change_ms = now;
+}
+
+ButtonID stable_b = last_stable_button;
+if (now - btn_last_change_ms >= BUTTON_DEBOUNCE_MS) {
+  stable_b = raw_b;
+}
+
+if (stable_b != last_stable_button) {
+  // Edge detected: button changed
+  if (stable_b != BTN_NONE) {
+    handle_button(stable_b);
+  }
+  last_stable_button = stable_b;
+}
+
   bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
   if (temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
     flags |= OVERTEMP_FAULT;
@@ -880,6 +1027,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
