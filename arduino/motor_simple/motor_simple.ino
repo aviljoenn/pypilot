@@ -6,8 +6,6 @@
 // - Sends periodic FLAGS and RUDDER frames
 // - Drives IBT-2 H-bridge + clutch based on COMMAND / DISENGAGE
 // - Obeys limit switches + rudder pot min/max
-// ---- Inno-Pilot version ----
-const char INNOPILOT_VERSION[] = "V2";
 
 #include <Arduino.h>
 #include <stdint.h>
@@ -19,6 +17,16 @@ const char INNOPILOT_VERSION[] = "V2";
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include "crc.h"    // your existing CRC-8 table + crc8()
+
+// ---- Inno-Pilot version ----
+const char INNOPILOT_VERSION[] = "V2";
+// Boot / online timing (user-tweakable)
+const unsigned long PI_BOOT_EST_MS    = 60000UL;  // 60s estimate, tweak later
+const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
+
+bool pi_online           = false;    // true once we see first valid frame
+unsigned long boot_start_ms    = 0;  // reference after splash
+unsigned long pi_online_time_ms = 0; // when we first saw Pi online
 
 // ---- Pins ----
 const uint8_t LED_PIN          = 13;
@@ -304,26 +312,75 @@ void oled_draw() {
     return;
   }
 
+  unsigned long now = millis();
+
   // Measurements
   float vin        = read_voltage_v();
   float ia_instant = read_current_a();
   float ia         = smooth_current_for_display(ia_instant);
-  float piv        = pi_voltage_v;  // already maintained in loop
+  float piv        = pi_voltage_v;  // maintained in loop
 
   bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
+  bool show_online  = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
+  bool pi_offline   = !pi_online;
+
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Header: Inno-Pilot + version
+  // ----- Header: "Inno-Pilot V2" in bold-ish (draw twice) -----
+  display.setTextSize(1);
   display.setCursor(0, 0);
   display.print(F("Inno-Pilot "));
   display.print(INNOPILOT_VERSION);
 
+  // Simulate bold by drawing again slightly lower
+  display.setCursor(0, 1);
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
+
+  // Y position for second "real" line after the bold header
+  const uint8_t LINE2_Y = 10;
+
+  // ----- Online splash (Pi controller online) -----
+  if (show_online) {
+    display.setTextSize(1);
+    display.setCursor(0, LINE2_Y);
+    display.println(F("Inno-Controller"));
+
+    display.setCursor(0, LINE2_Y + 10);
+    display.println(F("On-line..."));
+
+    display.display();
+    return;
+  }
+
+  // ----- Booting indication (Pi offline) -----
+  if (pi_offline) {
+    // Approximate boot percentage based on time since boot_start_ms
+    unsigned long elapsed = now - boot_start_ms;
+    if (elapsed > PI_BOOT_EST_MS) elapsed = PI_BOOT_EST_MS;
+    uint8_t pct = (uint8_t)((elapsed * 100UL) / PI_BOOT_EST_MS);
+
+    display.setTextSize(1);
+    display.setCursor(0, LINE2_Y);
+    display.println(F("Inno-Controller"));
+
+    display.setCursor(0, LINE2_Y + 10);
+    display.print(F("Booting "));
+    display.print(pct);
+    display.println(F("%"));
+
+    display.display();
+    return;
+  }
+
+  // ----- Normal telemetry display (Pi online, no online splash) -----
+  display.setTextSize(1);
+
   // Fault line (Pi voltage and/or overtemp)
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    display.setCursor(0, 10);
+    display.setCursor(0, LINE2_Y);
     display.print(F("FAULT: "));
     if (pi_overvolt_fault) {
       display.print(F("PiV HIGH"));
@@ -334,15 +391,15 @@ void oled_draw() {
     }
   }
 
-  // Engaged / Clutch status
-  display.setCursor(0, 22);
+  // Engaged / Clutch
+  display.setCursor(0, LINE2_Y + 10);
   display.print(F("Eng: "));
   display.print((flags & ENGAGED) ? F("YES") : F("NO"));
   display.print(F("  Cl: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Main supply voltage & current
-  display.setCursor(0, 32);
+  // Main Vin & current
+  display.setCursor(0, LINE2_Y + 20);
   display.print(F("Vin: "));
   display.print(vin, 1);
   display.print(F("V  I: "));
@@ -350,7 +407,7 @@ void oled_draw() {
   display.print(F("A"));
 
   // Controller temperature
-  display.setCursor(0, 42);
+  display.setCursor(0, LINE2_Y + 30);
   display.print(F("CtlT: "));
   if (temp_valid) {
     display.print(temp_c, 1);
@@ -360,36 +417,12 @@ void oled_draw() {
   }
 
   // Pi 5V rail
-  display.setCursor(0, 52);
+  display.setCursor(0, LINE2_Y + 40);
   display.print(F("PiV: "));
   display.print(piv, 2);
   display.print(F("V"));
 
   display.display();
-}
-
-// Read rudder pot and scale to 0..65535 for telemetry
-uint16_t read_rudder_scaled() {
-  int a = analogRead(RUDDER_PIN);   // 0..1023
-  rudder_adc_last = a;              // save raw for limit logic
-  return (uint16_t)a * 64;          // 0..~65472
-}
-
-// ---- Limit logic helpers ----
-// V2: if LIMIT_SWITCHES_ACTIVE is false, ignore the switch pins completely.
-bool port_limit_switch_hit() {
-  if (!LIMIT_SWITCHES_ACTIVE) {
-    return false;
-  }
-  // NC -> GND, so HIGH = open/tripped/broken
-  return digitalRead(PORT_LIMIT_PIN) == HIGH;
-}
-
-bool stbd_limit_switch_hit() {
-  if (!LIMIT_SWITCHES_ACTIVE) {
-    return false;
-  }
-  return digitalRead(STBD_LIMIT_PIN) == HIGH;
 }
 
 // ---- Motor + clutch drive based on last_command_val & flags ----
@@ -499,6 +532,12 @@ void update_motor_from_command() {
 void process_packet() {
   flags |= SYNC;
 
+  // Mark Pi controller online on first valid frame
+  if (!pi_online) {
+    pi_online = true;
+    pi_online_time_ms = millis();
+  }
+
   uint16_t value = in_bytes[1] | (in_bytes[2] << 8);
   uint8_t  code  = in_bytes[0];
 
@@ -562,25 +601,26 @@ void setup() {
 
   Wire.begin();
   oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  Wire.begin();
-  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
 
     // Splash: big Inno-Pilot
-    display.setTextSize(2);            // larger font
+    display.setTextSize(2);
     display.setCursor(10, 10);
     display.println(F("Inno-Pilot"));
 
     display.setTextSize(1);
-    display.setCursor(40, 36);
+    display.setCursor(36, 36);
     display.print(F("Version "));
     display.println(INNOPILOT_VERSION);
 
     display.display();
-    delay(1500);   // show splash for 1.5 seconds
+    delay(3000);   // splash for 3 seconds (was 1.5s)
   }
+
+  // after splash, start boot timer reference
+  boot_start_ms = millis();
 
   // Startup blink so we know this firmware is running
   digitalWrite(LED_PIN, HIGH);
@@ -764,6 +804,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
