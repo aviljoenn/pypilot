@@ -330,47 +330,45 @@ void oled_draw() {
 
   bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
-  bool show_online  = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
-  bool pi_offline   = !pi_online;
+  // Boot/online state
+  unsigned long elapsed       = now - boot_start_ms;
+  bool show_online            = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
+  bool pi_offline             = !pi_online;
+  bool in_boot_window         = pi_offline && (elapsed < PI_BOOT_EST_MS);
+  bool offline_timeout        = pi_offline && (elapsed >= PI_BOOT_EST_MS);
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-
-  // ----- Header: "Inno-Pilot V2" in bold-ish (draw twice) -----
   display.setTextSize(1);
+
+  // ----- Header: "Inno-Pilot V2" in bold-ish -----
   display.setCursor(0, 0);
   display.print(F("Inno-Pilot "));
   display.print(INNOPILOT_VERSION);
 
-  // Simulate bold by drawing again slightly lower
+  // Draw again 1px lower to fake bold
   display.setCursor(0, 1);
   display.print(F("Inno-Pilot "));
   display.print(INNOPILOT_VERSION);
 
-  // Y position for second "real" line after the bold header
-  const uint8_t LINE2_Y = 10;
+  const uint8_t LINE2_Y = 10;   // Y for second logical line
 
   // ----- Online splash (Pi controller online) -----
-unsigned long elapsed  = now - boot_start_ms;
-bool show_online       = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
-bool pi_offline        = !pi_online;
-bool in_boot_window    = pi_offline && (elapsed < PI_BOOT_EST_MS);
-bool offline_timeout   = pi_offline && (elapsed >= PI_BOOT_EST_MS);
-
   if (show_online) {
-    display.setTextSize(1);
     display.setCursor(0, LINE2_Y);
     display.println(F("Inno-Controller"));
+
     display.setCursor(0, LINE2_Y + 10);
     display.println(F("On-line..."));
+
     display.display();
     return;
   }
 
+  // ----- Booting indication (Pi offline, within boot estimate) -----
   if (in_boot_window) {
-    // Show estimated boot progress
     uint8_t pct = (uint8_t)((elapsed * 100UL) / PI_BOOT_EST_MS);
-    display.setTextSize(1);
+
     display.setCursor(0, LINE2_Y);
     display.println(F("Inno-Controller"));
 
@@ -383,16 +381,15 @@ bool offline_timeout   = pi_offline && (elapsed >= PI_BOOT_EST_MS);
     return;
   }
 
+  // ----- Controller offline (boot time exceeded, still no Pi) -----
   if (offline_timeout) {
-    // Pi hasn't come online within estimated time -> controller offline
-    display.setTextSize(1);
     display.setCursor(0, LINE2_Y);
     display.println(F("Inno-Controller"));
 
     display.setCursor(0, LINE2_Y + 10);
     display.println(F("OFFLINE"));
 
-    // Optionally: still show Vin/I etc below
+    // Still show Vin/I so user sees life
     display.setCursor(0, LINE2_Y + 20);
     display.print(F("Vin: "));
     display.print(vin, 1);
@@ -405,15 +402,11 @@ bool offline_timeout   = pi_offline && (elapsed >= PI_BOOT_EST_MS);
   }
 
   // ----- Normal telemetry display (Pi online, no online splash) -----
-  display.setTextSize(1);
 
   // Fault line (Pi voltage and/or overtemp)
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
     display.setCursor(0, LINE2_Y);
     display.print(F("FAULT: "));
-    // in the normal telemetry section, for debug
-    display.setCursor(90, 0);
-    display.print(any_serial_rx ? F("RX") : F("--"));
     if (pi_overvolt_fault) {
       display.print(F("PiV HIGH"));
     } else if (pi_undervolt_fault) {
@@ -862,6 +855,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
