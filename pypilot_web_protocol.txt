@@ -1,0 +1,119 @@
+### Overview (how the browser talks to Pypilot)
+The web UI you load at `http://<ip>:8000` is a Flask app (`compute_module/pypilot/web/web.py`) that serves static HTML/JS. The browser connects back to the same web server over **Socket.IO** (WebSockets) and **does not talk directly to the autopilot server**. Instead, the web server acts as a bridge: it opens a `pypilotClient` connection to the Pypilot server and relays messages between the browser and the Pypilot server.
+Sources: `compute_module/pypilot/web/web.py`, `compute_module/pypilot/web/static/pypilot_control.js`, `compute_module/pypilot/pypilot/client.py`.
+Commands used: `rg -n "pypilot|web" ...`, `sed -n '1,220p' .../web.py`, `sed -n '220,520p' .../web.py`, `sed -n '1,240p' .../pypilot_control.js`, `sed -n '240,520p' .../pypilot_control.js`, `sed -n '520,1040p' .../pypilot_control.js`, `sed -n '1,240p' .../pypilot/pypilot/client.py`, `sed -n '240,560p' .../pypilot/pypilot/client.py`.
+
+---
+
+### 1) Browser → Web server (Socket.IO)
+**Where it happens:** `compute_module/pypilot/web/static/pypilot_control.js`
+**How it connects:**
+- The JS reads the port (defaults to 8000) and opens a Socket.IO connection:
+  ```js
+  socket = io.connect(location.protocol + '//' + document.domain + ':' + port + namespace);
+  ```
+  Source: `compute_module/pypilot/web/static/pypilot_control.js`.
+
+**What it sends:**
+- **Set a value:**  
+  ```js
+  socket.emit('pypilot', name + '=' + JSON.stringify(value));
+  ```
+- **Watch (subscribe) to telemetry:**  
+  ```js
+  socket.emit('pypilot', 'watch={"' + name + '":' + JSON.stringify(period) + '}')
+  ```
+  Here `period` is:
+  - `true`/`0` for continuous updates,
+  - a numeric period (seconds) for periodic updates,
+  - `false` to stop watching.  
+  Source: `compute_module/pypilot/web/static/pypilot_control.js`.
+
+**What it receives:**
+- `pypilot_values`: A JSON map of all available value descriptors (min/max/units/type/etc.) to populate UI controls.
+- `pypilot`: A JSON map of **current telemetry values** for keys currently being watched.
+- `pypilot_disconnect`: Signals loss of the backend Pypilot connection.
+- `pong`: Used for latency stats.
+
+All of that is handled in the `socket.on(...)` blocks in `pypilot_control.js`.
+
+---
+
+### 2) Web server → Pypilot server (pypilotClient)
+**Where it happens:** `compute_module/pypilot/web/web.py` + `compute_module/pypilot/pypilot/client.py`
+
+The web server defines a Socket.IO namespace handler (`class pypilotWeb`) that:
+1. **Creates a pypilotClient per browser session** on connect:
+   ```python
+   client = pypilotClient()
+   self.clients[request.sid] = client
+   ```
+   Source: `compute_module/pypilot/web/web.py`.
+
+2. **Relays browser messages to the pypilot server**:
+   ```python
+   def on_pypilot(self, message):
+       self.clients[request.sid].send(message + '\n')
+   ```
+   That means whatever the browser emits on `pypilot` is forwarded as a raw line in the Pypilot protocol (e.g., `ap.enabled=true\n`, `watch={"imu.heading":0.5}\n`).  
+   Source: `compute_module/pypilot/web/web.py`.
+
+3. **Polls Pypilot and forwards telemetry to the browser** in a background thread:
+   - `client.list_values()` → emitted as `pypilot_values`
+   - `client.receive()` → emitted as `pypilot`  
+   Source: `compute_module/pypilot/web/web.py`.
+
+---
+
+### 3) Pypilot wire protocol (what the bridge sends/receives)
+**Where it’s defined:** `compute_module/pypilot/pypilot/client.py`
+
+The `pypilotClient` uses a **line-based TCP protocol** where each message is:
+
+```
+<name>=<json_value>\n
+```
+
+Key behaviors:
+- **Set command:**  
+  `pypilotClient.set(name, value)` serializes values and sends `name=<json>\n`.  
+  Source: `compute_module/pypilot/pypilot/client.py`.
+
+- **Watch (subscribe) command:**  
+  The client sends a line like:
+  ```
+  watch={"imu.heading":0.5,"ap.enabled":true}
+  ```
+  (sent when `watch(...)` is called).  
+  Source: `compute_module/pypilot/pypilot/client.py`.
+
+- **Receive:**  
+  Incoming lines are split on `=` and parsed as JSON:
+  ```python
+  name, data = line.rstrip().split('=', 1)
+  value = pyjson.loads(data)
+  ```
+  They are then exposed via `client.receive()` which returns `{name: value}` for watched items.  
+  Source: `compute_module/pypilot/pypilot/client.py`.
+
+---
+
+### Putting it all together (end-to-end flow)
+1. **Browser loads** `/` from Flask on port **8000**.  
+2. **Browser opens a Socket.IO connection** to the web server (same host/port).  
+3. **Web server creates `pypilotClient()`** and connects to the Pypilot server (default port **23322**) using the line-based protocol.  
+4. **Browser requests telemetry** via `socket.emit('pypilot', 'watch={...}')`.  
+5. **Web server forwards** that line verbatim to the Pypilot server (`client.send(... + '\n')`).  
+6. **Pypilot server sends** `name=json` telemetry lines; `pypilotClient.receive()` converts to `{name: value}`.  
+7. **Web server emits** telemetry updates back to the browser as `pypilot` JSON.  
+
+Sources: `compute_module/pypilot/web/web.py`, `compute_module/pypilot/web/static/pypilot_control.js`, `compute_module/pypilot/pypilot/client.py`.
+
+---
+
+### If you want to dig deeper
+The two most relevant files for the browser↔Pypilot protocol are:
+- `compute_module/pypilot/web/static/pypilot_control.js` — exact Socket.IO events and watch/set semantics.
+- `compute_module/pypilot/pypilot/client.py` — line protocol (`name=json`) and watch handling.
+
+If you want, I can map specific telemetry keys (e.g., `ap.heading`, `imu.*`, `rudder.*`) to where they originate in the autopilot process, but that will involve checking more of the server-side Pypilot code.
