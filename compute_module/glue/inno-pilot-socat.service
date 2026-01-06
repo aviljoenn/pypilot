@@ -1,0 +1,15 @@
+[Unit]
+Description=Inno-Pilot PTY pair for pypilot servo
+After=local-fs.target
+Before=inno-pilot-fixlink.service inno-pilot-bridge.service pypilot.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat \
+  pty,link=/dev/ttyINNOPILOT,raw,echo=0,group=dialout,mode=660 \
+  pty,link=/dev/ttyINNOPILOT_BRIDGE,raw,echo=0,group=dialout,mode=660
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

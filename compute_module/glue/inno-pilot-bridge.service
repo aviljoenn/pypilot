@@ -1,0 +1,15 @@
+[Unit]
+Description=Inno-Pilot bridge between Nano and pypilot
+After=inno-pilot-socat.service inno-pilot-fixlink.service
+Before=pypilot.service
+
+[Service]
+Type=simple
+User=aviljoen
+Group=dialout
+ExecStart=/usr/local/bin/inno_pilot_bridge.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

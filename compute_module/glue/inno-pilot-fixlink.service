@@ -1,0 +1,11 @@
+[Unit]
+Description=Inno-Pilot redirect USB by-id symlink to PTY
+After=inno-pilot-socat.service
+Before=inno-pilot-bridge.service pypilot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/inno_pilot_fix_symlink.sh
+
+[Install]
+WantedBy=multi-user.target
