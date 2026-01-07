@@ -19,7 +19,7 @@
 #include "crc.h"    // your existing CRC-8 table + crc8()
 
 // ---- Inno-Pilot version ----
-const char INNOPILOT_VERSION[] = "V2b";
+const char INNOPILOT_VERSION[] = "V2c";
 
 // Boot / online timing (user-tweakable)
 const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
@@ -1242,6 +1242,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
