@@ -25,6 +25,7 @@ const char INNOPILOT_VERSION[] = "V2b";
 const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 bool pi_online_at_boot = false;
+bool ap_ui_on = false;   // “desired AP state” from B3, used for immediate OLED feedback
 
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
@@ -276,9 +277,9 @@ void handle_button(ButtonID b) {
       send_button_event(BTN_EVT_MINUS1);
       break;
 
-    case BTN_B3: { // AP toggle
-      bool engaged = (flags & ENGAGED);
-      show_overlay(engaged ? "AP: OFF" : "AP: ON");
+    case BTN_B3: { // AP On or Off
+      ap_ui_on = !ap_ui_on;
+      show_overlay(ap_ui_on ? "AP: ON" : "AP: OFF");
       send_button_event(BTN_EVT_TOGGLE);
       break;
     }
@@ -586,7 +587,7 @@ void oled_draw() {
   // Engaged / Clutch
   display.setCursor(0, LINE2_Y + 10);
   display.print(F("AP: "));
-  display.print((flags & ENGAGED) ? F("ON") : F("Off"));
+  display.print(ap_ui_on ? F("ON") : F("Off"));
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
@@ -1068,6 +1069,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
