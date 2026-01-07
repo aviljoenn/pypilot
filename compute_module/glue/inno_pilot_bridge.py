@@ -1,218 +1,144 @@
 #!/usr/bin/env python3
-#
-# Inno-Pilot bridge:
-# - Forwards servo protocol between Nano and pypilot
-# - Interprets BUTTON_EVENT_CODE frames from Nano
-# - Uses pypilotClient API (watch/receive/set) to control ap.enabled / ap.heading_command
-
 import time
 import serial
-
-from pypilot.client import pypilotClient  # uses compute_module/pypilot/pypilot/client.py
+from pypilot.client import pypilotClient  # no .get() API; use watch/receive/set
 
 # Serial devices
-NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"  # real Nano servo
-PILOT_PORT = "/dev/ttyINNOPILOT_BRIDGE"                               # side connected to pypilot via socat
+NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"  # real Nano USB serial
+PILOT_PORT = "/dev/ttyINNOPILOT_BRIDGE"                               # PTY side that talks to pypilot
 BAUD       = 38400
 
-DEBUG_NANO_STREAM = True  # set to False later if logs get too noisy
-
-# Button event protocol from Nano (motor_simple.ino)
+# Nano -> Bridge button event protocol
 BUTTON_EVENT_CODE = 0xE0
-
-BTN_EVT_NONE    = 0
 BTN_EVT_MINUS10 = 1
 BTN_EVT_MINUS1  = 2
 BTN_EVT_TOGGLE  = 3
 BTN_EVT_PLUS10  = 4
 BTN_EVT_PLUS1   = 5
 
-# Global autopilot client state
-pilot_client = None
-ap_enabled = None
-ap_heading_command = None
+# Bridge -> Nano state protocol
+AP_ENABLED_CODE = 0xE1  # value: 0/1
 
+# How often to refresh AP state to Nano (keeps Nano "online" even if servo frames are quiet)
+AP_STATE_PERIOD_S = 0.5
 
-def connect_pilot():
-    """Connect to pypilot server and start watching key values."""
-    global pilot_client, ap_enabled, ap_heading_command
+def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
+    """CRC-8 MSB-first, poly 0x31, init 0xFF (matches your Arduino crc8)."""
+    crc = init
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) & 0xFF) ^ poly
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc & 0xFF
 
-    # Reset local cache when reconnecting
-    ap_enabled = None
-    ap_heading_command = None
+def build_frame(code: int, value: int) -> bytes:
+    lo = value & 0xFF
+    hi = (value >> 8) & 0xFF
+    body = bytes([code, lo, hi])
+    return body + bytes([crc8_msb(body)])
 
-    try:
-        c = pypilotClient()  # defaults to localhost + DEFAULT_PORT
-        if not c.connect(True):
-            print("Inno-Pilot: failed to connect to pypilot server")
-            pilot_client = None
-            return False
-
-        # Watch the values we care about.
-        # True (or 0) means "send every update as soon as it changes".
-        c.watch('ap.enabled', True)
-        c.watch('ap.heading_command', True)
-
-        pilot_client = c
-        print("Inno-Pilot: connected to pypilot server and watching ap.enabled/ap.heading_command")
-        return True
-    except Exception as e:
-        print("Inno-Pilot: error connecting to pypilot:", e)
-        pilot_client = None
-        return False
-
-
-def pump_pilot():
-    """
-    Poll pypilot client and update local copies of values.
-
-    This uses pypilotClient.receive(), which internally calls poll()
-    to send any pending watch updates and pull new value updates.
-    """
-    global pilot_client, ap_enabled, ap_heading_command
-
-    if not pilot_client or not pilot_client.connection:
-        return
-
-    try:
-        msgs = pilot_client.receive(0)  # receive() calls poll(timeout)
-        for name, value in msgs.items():
-            if name == 'ap.enabled':
-                # pypilot uses JSON booleans; value may be True/False already.
-                ap_enabled = bool(value)
-            elif name == 'ap.heading_command':
-                # heading_command is a float in radians or degrees depending on mode;
-                # here we just treat it as a float and apply relative deltas.
-                try:
-                    ap_heading_command = float(value)
-                except (TypeError, ValueError):
-                    ap_heading_command = None
-    except Exception as e:
-        print("Inno-Pilot: error polling pypilot:", e)
-
-
-def handle_button_event(ev):
-    """Translate Nano button events into pypilot AP actions via pypilotClient.set."""
-    global pilot_client, ap_enabled, ap_heading_command
-
-    if not pilot_client or not pilot_client.connection:
-        print("Inno-Pilot: no pypilot connection; button event ignored:", ev)
-        return
-
-    # ----- AP toggle -----
-    if ev == BTN_EVT_TOGGLE:
-        if ap_enabled is None:
-            print("Inno-Pilot: AP toggle ignored (ap.enabled unknown)")
-            return
-
-        new_val = not ap_enabled
-        try:
-            pilot_client.set('ap.enabled', new_val)
-            ap_enabled = new_val
-            print("Inno-Pilot: AP TOGGLE ->", new_val)
-        except Exception as e:
-            print("Inno-Pilot: error setting ap.enabled:", e)
-        return
-
-    # ----- Heading step commands -----
-    if ev in (BTN_EVT_MINUS10, BTN_EVT_MINUS1, BTN_EVT_PLUS10, BTN_EVT_PLUS1):
-        if ap_heading_command is None:
-            print("Inno-Pilot: heading step ignored (ap.heading_command unknown)")
-            return
-
-        if   ev == BTN_EVT_MINUS10: delta = -10.0
-        elif ev == BTN_EVT_MINUS1:  delta =  -1.0
-        elif ev == BTN_EVT_PLUS1:   delta =   1.0
-        elif ev == BTN_EVT_PLUS10:  delta =  10.0
-        else:                       delta =   0.0
-
-        new_heading = float(ap_heading_command) + delta
-        try:
-            pilot_client.set('ap.heading_command', new_heading)
-            ap_heading_command = new_heading
-            print(f"Inno-Pilot: heading += {delta} -> {new_heading}")
-        except Exception as e:
-            print("Inno-Pilot: error setting ap.heading_command:", e)
-        return
-
-    print("Inno-Pilot: unknown button event", ev)
-
+def clamp_heading(deg: float) -> float:
+    # keep in 0..360 range
+    deg = deg % 360.0
+    if deg < 0:
+        deg += 360.0
+    return deg
 
 def main():
-    global pilot_client
+    # pypilot TCP client (no direct get(); we watch and receive updates)
+    client = pypilotClient()
+    client.watch('ap.enabled', True)
+    client.watch('ap.heading_command', True)
 
-    # Connect to pypilot once at startup; if it fails, we'll retry inside the loop.
-    connect_pilot()
+    ap_enabled = None
+    heading_cmd = None
+
+    # Open serial ports
+    nano = serial.Serial(NANO_PORT, BAUD, timeout=0.01)
+    pilot = serial.Serial(PILOT_PORT, BAUD, timeout=0.01)
+
+    # Buffer for Nano->pilot frames
+    frame_buf = bytearray()
+
+    last_ap_sent = None
+    last_ap_sent_ts = 0.0
 
     while True:
-        try:
-            nano = serial.Serial(NANO_PORT, BAUD, timeout=0.01)
-            pilot = serial.Serial(PILOT_PORT, BAUD, timeout=0.01)
-            print("Inno-Pilot: bridge connected to Nano and PTY")
+        now = time.monotonic()
 
-            # Simple state machine for scanning button frames in the Nano stream
-            btn_state = 0
-            btn_lo = 0
-            btn_ev = 0
+        # ---- Pump pypilot client + update cached values ----
+        msgs = client.receive(0)  # non-blocking
+        if 'ap.enabled' in msgs:
+            try:
+                ap_enabled = bool(msgs['ap.enabled'])
+            except Exception:
+                pass
 
-            while True:
-                # Keep pypilot values up to date (and reconnect if needed)
-                if pilot_client and pilot_client.connection:
-                    pump_pilot()
-                else:
-                    connect_pilot()
+        if 'ap.heading_command' in msgs:
+            try:
+                heading_cmd = float(msgs['ap.heading_command'])
+            except Exception:
+                pass
 
-                # ----- Data from pypilot -> Nano -----
-                try:
-                    data_from_pilot = pilot.read(64)
-                    if data_from_pilot:
-                        nano.write(data_from_pilot)
-                except Exception as e:
-                    print("Inno-Pilot: error reading from pypilot side:", e)
-                    time.sleep(0.5)
+        # ---- Push AP enabled state down to Nano (keepalive + on change) ----
+        if ap_enabled is not None:
+            need_send = (last_ap_sent is None) or (ap_enabled != last_ap_sent) or ((now - last_ap_sent_ts) >= AP_STATE_PERIOD_S)
+            if need_send:
+                frame = build_frame(AP_ENABLED_CODE, 1 if ap_enabled else 0)
+                nano.write(frame)
+                last_ap_sent = ap_enabled
+                last_ap_sent_ts = now
+                # optional debug:
+                # print(f"Inno-Pilot: sent AP state to Nano: {int(ap_enabled)}")
 
-                # ----- Data from Nano -> pypilot -----
-                try:
-                    data_from_nano = nano.read(64)
-                    if data_from_nano:
-                        # Always forward raw bytes unchanged
-                        pilot.write(data_from_nano)
+        # ---- Data from pypilot -> Nano ----
+        data_from_pilot = pilot.read(256)
+        if data_from_pilot:
+            nano.write(data_from_pilot)
 
-                        if DEBUG_NANO_STREAM:
-                            print(
-                                "Inno-Pilot: nano->pilot:",
-                                " ".join(f"{b:02X}" for b in data_from_nano),
-                            )
+        # ---- Data from Nano -> pypilot ----
+        data_from_nano = nano.read(256)
+        if data_from_nano:
+            frame_buf.extend(data_from_nano)
 
-                        # Scan Nano stream for BUTTON_EVENT_CODE frames
-                        for b in data_from_nano:
-                            if btn_state == 0:
-                                if b == BUTTON_EVENT_CODE:
-                                    btn_state = 1
-                            elif btn_state == 1:
-                                # low byte of event
-                                btn_lo = b
-                                btn_state = 2
-                            elif btn_state == 2:
-                                # high byte of event
-                                btn_ev = btn_lo | (b << 8)
-                                btn_state = 3
-                            elif btn_state == 3:
-                                # CRC byte – ignore CRC, fire event
-                                print("Inno-Pilot: button event from Nano:", btn_ev)
-                                handle_button_event(btn_ev)
-                                btn_state = 0
+            # Frames are always 4 bytes in this protocol
+            while len(frame_buf) >= 4:
+                f = bytes(frame_buf[:4])
+                del frame_buf[:4]
 
-                except Exception as e:
-                    print("Inno-Pilot: error reading from Nano side:", e)
-                    time.sleep(0.5)
+                code = f[0]
+                value = f[1] | (f[2] << 8)
 
-                time.sleep(0.01)
+                # forward raw frame to pypilot unchanged
+                pilot.write(f)
 
-        except Exception as e:
-            print("Inno-Pilot: bridge failed to open ports:", e)
-            time.sleep(2.0)  # backoff and retry
+                # handle button events
+                if code == BUTTON_EVENT_CODE:
+                    # print(f"Inno-Pilot: button event from Nano: {value}")
+                    try:
+                        if value == BTN_EVT_TOGGLE:
+                            # Toggle ap.enabled using cached state (fallback: enable if unknown)
+                            target = True if ap_enabled is None else (not ap_enabled)
+                            client.set('ap.enabled', target)
 
+                        elif value in (BTN_EVT_MINUS10, BTN_EVT_MINUS1, BTN_EVT_PLUS10, BTN_EVT_PLUS1):
+                            if heading_cmd is None:
+                                continue
+                            delta = 0.0
+                            if value == BTN_EVT_MINUS10: delta = -10.0
+                            elif value == BTN_EVT_MINUS1: delta = -1.0
+                            elif value == BTN_EVT_PLUS1: delta = 1.0
+                            elif value == BTN_EVT_PLUS10: delta = 10.0
+
+                            client.set('ap.heading_command', clamp_heading(heading_cmd + delta))
+
+                    except Exception as e:
+                        print("Inno-Pilot: button event handling error:", e)
+
+        time.sleep(0.01)
 
 if __name__ == "__main__":
     main()
