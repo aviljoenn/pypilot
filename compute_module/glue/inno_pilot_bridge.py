@@ -90,8 +90,10 @@ def main():
     client.watch('ap.heading_command', True)
     client.watch('rudder.angle', True)
     client.watch('rudder.range', True)
+    client.watch('ap.heading', True)
 
     ap_enabled = None
+    ap_heading = None
     heading_cmd = None
     heading = None
     rudder_angle = None
@@ -121,7 +123,13 @@ def main():
                 ap_enabled = bool(msgs["ap.enabled"])
             except Exception:
                 pass
-
+                
+        if 'ap.heading' in msgs:
+            try:
+                ap_heading = float(msgs['ap.heading'])
+            except Exception:
+                pass
+                
         if "ap.heading_command" in msgs:
             try:
                 heading_cmd = float(msgs["ap.heading_command"])
@@ -153,7 +161,25 @@ def main():
                 nano.write(build_frame(AP_ENABLED_CODE, 1 if ap_enabled else 0))
                 last_ap_sent = ap_enabled
                 last_ap_sent_ts = now
-
+                
+        # heading (0xE2) and command (0xE3) in deg*10
+        if ap_heading is not None:
+            nano.write(build_frame(PILOT_HEADING_CODE, int(round(ap_heading * 10)) & 0xFFFF))
+        
+        if heading_cmd is not None:
+            nano.write(build_frame(PILOT_COMMAND_CODE, int(round(heading_cmd * 10)) & 0xFFFF))
+        
+        # rudder angle (0xE4) signed deg*10
+        if rudder_angle is not None:
+            nano.write(build_frame(PILOT_RUDDER_CODE, int(round(rudder_angle * 10)) & 0xFFFF))
+        
+        # limits derived from rudder.range (0xE5 port, 0xE6 stbd)
+        if rudder_range is not None:
+            port_lim = int(round(+rudder_range * 10))
+            stbd_lim = int(round(-rudder_range * 10))
+            nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, port_lim & 0xFFFF))
+            nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, stbd_lim & 0xFFFF))
+    
         # ---- Push extra telemetry down to Nano (periodic) ----
         # Keep this lightweight; we send at most once per loop tick here.
         # If values are None, we just skip that frame.
