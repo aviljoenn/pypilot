@@ -193,7 +193,8 @@ enum ButtonEvent {
   BTN_EVT_MINUS1  = 2,
   BTN_EVT_TOGGLE  = 3,
   BTN_EVT_PLUS10  = 4,
-  BTN_EVT_PLUS1   = 5
+  BTN_EVT_PLUS1   = 5,
+  BTN_EVT_STOP    = 6
 };
 
 // Overlay for big transient messages (e.g. -10, +1, AP: ON)
@@ -980,9 +981,16 @@ void loop() {
   }
 
   if (ptm_edge) {
-    // Emergency stop: disengage servo and neutral command
+    // Emergency stop: force AP off
     flags &= ~ENGAGED;
     last_command_val = 1000;
+
+    // Make OLED show OFF immediately (remote truth will follow)
+    ap_display = false;
+    ap_display_override_until_ms = millis() + 2000UL;
+
+    // Tell the bridge/pypilot to disable ap.enabled
+    send_button_event(BTN_EVT_STOP);
 
     // Show big STOP overlay
     show_overlay("STOP");
@@ -1175,3 +1183,4 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
