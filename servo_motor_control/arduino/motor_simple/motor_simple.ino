@@ -34,6 +34,8 @@ bool pi_online_at_boot = false;
 const uint8_t PILOT_HEADING_CODE = 0xE2; // imu.heading * 10 (uint16)
 const uint8_t PILOT_COMMAND_CODE = 0xE3; // ap.heading_command * 10 (uint16)
 const uint8_t PILOT_RUDDER_CODE  = 0xE4; // rudder.angle * 10 (int16, two's complement)
+const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // Port limit angle according to pypilot
+const uint8_t PILOT_RUDDER_STBD_LIM_CODE  = 0xE6; // Starboard limit angle according to pypilot
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -887,6 +889,17 @@ void process_packet() {
       pilot_rudder_valid = true;
       break;
 
+    case PILOT_RUDDER_PORT_LIM_CODE:
+      pilot_port_limit_deg10 = (int16_t)value;
+      pilot_port_limit_valid = true;
+      break;
+    
+    case PILOT_RUDDER_STBD_LIM_CODE:
+      pilot_stbd_limit_deg10 = (int16_t)value;
+      pilot_stbd_limit_valid = true;
+      break;
+
+    
     default:
       // Unhandled commands ignored for now
       break;
@@ -1223,6 +1236,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
