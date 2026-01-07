@@ -22,10 +22,13 @@
 const char INNOPILOT_VERSION[] = "V2b";
 
 // Boot / online timing (user-tweakable)
+const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
+bool ap_enabled_remote = false;        // truth from Pi bridge
+bool ap_display        = false;        // what OLED shows (can be briefly “optimistic”)
+unsigned long ap_display_override_until_ms = 0;
 const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 bool pi_online_at_boot = false;
-bool ap_ui_on = false;   // “desired AP state” from B3, used for immediate OLED feedback
 
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
@@ -277,9 +280,10 @@ void handle_button(ButtonID b) {
       send_button_event(BTN_EVT_MINUS1);
       break;
 
-    case BTN_B3: { // AP On or Off
-      ap_ui_on = !ap_ui_on;
-      show_overlay(ap_ui_on ? "AP: ON" : "AP: OFF");
+    case BTN_B3: { // AP On or Off (optimistic local UI, remote truth follows)
+      ap_display = !ap_display;
+      ap_display_override_until_ms = millis() + 2000UL; // 2s grace for remote confirm
+      show_overlay(ap_display ? "AP: ON" : "AP: OFF");
       send_button_event(BTN_EVT_TOGGLE);
       break;
     }
@@ -587,7 +591,7 @@ void oled_draw() {
   // Engaged / Clutch
   display.setCursor(0, LINE2_Y + 10);
   display.print(F("AP: "));
-  display.print(ap_ui_on ? F("ON") : F("Off"));
+  display.print(ap_display ? F("ON") : F("Off"));
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
@@ -640,9 +644,32 @@ void update_motor_from_command() {
   // Always update rudder ADC for limit logic
   int a = analogRead(RUDDER_PIN);   // 0..1023
   rudder_adc_last = a;
+  
+  unsigned long now = millis();
+  bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+  bool ap_active = ap_enabled_remote && pi_alive;
 
-  bool at_port_end = (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
-  bool at_stbd_end = (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
+  // Clutch engages when AP is enabled remotely OR manual jog is active.
+  // Safety: clutch forced OFF during pi_fault or overtemp.
+  bool clutch_should = (manual_override || ap_active) &&
+                       !pi_fault &&
+                       !(flags & OVERTEMP_FAULT);
+
+  digitalWrite(CLUTCH_PIN, clutch_should ? HIGH : LOW);
+
+  // If in a fault state, don't drive the motor at all
+  if (pi_fault || (flags & OVERTEMP_FAULT)) {
+    analogWrite(HBRIDGE_PWM_PIN, 0);
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    return;
+  }
+
+  bool at_port_end = port_limit_switch_hit() ||
+                     (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
+
+  bool at_stbd_end = stbd_limit_switch_hit() ||
+                     (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
 
   // Update rudder fault flags (as before)
   if (at_port_end) {
@@ -699,15 +726,71 @@ void update_motor_from_command() {
 
   // ---- Existing autopilot logic below (unchanged) ----
 
-  // If not engaged, stop motor as before
-  if (!(flags & ENGAGED)) {
+  // If AP is not active (remote ap.enabled false or Pi offline), don't drive motor
+  if (!ap_active) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
 
-  // ... your existing last_command_val / deadband / limit gating / PWM code ...
+  // ----- Autopilot motor drive from last_command_val -----
+  // last_command_val: 0..2000, 1000 = stop
+  int16_t delta = (int16_t)last_command_val - 1000;   // -1000..+1000
+
+  // Deadband around neutral
+  const int16_t DEADBAND = 20;
+  if (delta > -DEADBAND && delta < DEADBAND) {
+    analogWrite(HBRIDGE_PWM_PIN, 0);
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    return;
+  }
+
+  // Don't drive further into soft limits
+  if (delta > 0 && at_port_end) {
+    analogWrite(HBRIDGE_PWM_PIN, 0);
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    return;
+  }
+  if (delta < 0 && at_stbd_end) {
+    analogWrite(HBRIDGE_PWM_PIN, 0);
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    return;
+  }
+
+  // Duty mapping (keep MIN_DUTY = MAX_DUTY = 255 for your hydraulic pump: ON/OFF only)
+  // If you ever experiment with PWM later, set MIN_DUTY somewhere >= 180 and MAX_DUTY = 255.
+  const uint8_t MIN_DUTY = 255;
+  const uint8_t MAX_DUTY = 255;
+
+  int16_t abs_delta = (delta >= 0) ? delta : -delta;
+  if (abs_delta > 1000) abs_delta = 1000;
+
+  uint8_t duty = MIN_DUTY;
+  if (MAX_DUTY == MIN_DUTY) {
+    duty = MIN_DUTY;
+  } else {
+    int16_t span = 1000 - DEADBAND;
+    if (span < 1) span = 1;
+    int16_t effective = abs_delta - DEADBAND;
+    if (effective < 0) effective = 0;
+
+    duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
+  }
+
+  // Direction: delta > 0 => PORT (increase ADC), delta < 0 => STBD (decrease ADC)
+  if (delta > 0) {
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+  } else {
+    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+  }
+
+  analogWrite(HBRIDGE_PWM_PIN, duty);
 }
 
 // Process one CRC-valid frame
@@ -733,9 +816,6 @@ void process_packet() {
     case COMMAND_CODE:
       // 0..2000, 1000 = neutral
       last_command_val = value;
-      if (value != 1000) {
-        flags |= ENGAGED;
-      }
       break;
 
     case DISENGAGE_CODE:
@@ -745,6 +825,26 @@ void process_packet() {
     case RESET_CODE:
       flags &= ~OVERCURRENT_FAULT;
       break;
+
+    case AP_ENABLED_CODE: {
+      bool en = (value != 0);
+      ap_enabled_remote = en;
+      if (en) {
+        flags |= ENGAGED;
+      } else {
+        flags &= ~ENGAGED;
+        last_command_val = 1000;  // neutral when AP disabled
+      }
+      
+      // If we are not in an override window, follow remote immediately.
+      // If we ARE overriding (user just pressed B3), cancel override once remote matches.
+      if (ap_display_override_until_ms == 0) {
+        ap_display = en;
+      } else if (ap_display == en) {
+        ap_display_override_until_ms = 0;
+      }
+      break;
+    }
 
     default:
       // Unhandled commands ignored for now
@@ -842,7 +942,12 @@ void loop() {
   unsigned long now = millis();
 
   temp_service(now);
-
+  // Expire optimistic AP display override if remote didn't confirm in time
+  if (ap_display_override_until_ms && now > ap_display_override_until_ms) {
+    ap_display_override_until_ms = 0;
+    ap_display = ap_enabled_remote;  // revert to truth
+  }
+  
   static unsigned long last_pi_ms = 0;
   if (now - last_pi_ms >= 200) {
     last_pi_ms = now;
@@ -906,8 +1011,9 @@ if (now - btn_last_change_ms >= BUTTON_DEBOUNCE_MS) {
 manual_override = false;
 manual_dir      = 0;
 
-// Determine if AP is engaged from servo perspective
-bool ap_engaged = (flags & ENGAGED);
+// Treat AP as engaged only when remote ap.enabled is true AND Pi is alive
+bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+bool ap_engaged = ap_enabled_remote && pi_alive;
 
 // On a change of stable button state, act accordingly
 if (stable_b != last_stable_button) {
@@ -1069,34 +1175,3 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
