@@ -525,9 +525,9 @@ void oled_draw() {
     display.print(pct);
     display.print(F("%"));
   } else if (boot_offline || pi_timed_out) {
-    display.print(F("Inno-Cntl: Off-line"));
+    display.print(F("Inno-Cntl: Offline"));
   } else {
-    display.print(F("Inno-Cntl: On-line "));
+    display.print(F("Inno-Cntl: Online "));
     display.print(INNOPILOT_VERSION);
   }
 
@@ -1243,6 +1243,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
