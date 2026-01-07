@@ -425,17 +425,18 @@ void oled_draw() {
     return;
   }
 
-  unsigned long now = millis();
+  const unsigned long now = millis();
 
-  // Measurements
+  // ----------------------------
+  // Measurements used everywhere
+  // ----------------------------
   float vin        = read_voltage_v();
   float ia_instant = read_current_a();
   float ia         = smooth_current_for_display(ia_instant);
-  float piv        = pi_voltage_v;      // maintained in loop
 
   bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
-  // Format Vin / I / Temp for right-hand column
+  // Format bottom line: Vin / I / Temp (ALWAYS at y=52)
   char vnum[10], inum[10], tnum[10];
   char vbuf[12], ibuf[12], tbuf[12];
 
@@ -462,75 +463,62 @@ void oled_draw() {
     strncat(tbuf, "C", sizeof(tbuf) - strlen(tbuf) - 1);
   }
 
-  // Compute rudder angle from ADC (rough mapping, to be replaced later by pypilot calibration)
+  // Rudder angle (rough local mapping for now)
   float rudder_deg = 0.0f;
   {
     float centre   = 0.5f * (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END);
     float halfSpan = 0.5f * (RUDDER_ADC_PORT_END - RUDDER_ADC_STBD_END);
-    if (halfSpan < 1.0f) halfSpan = 1.0f;  // avoid divide by zero
+    if (halfSpan < 1.0f) halfSpan = 1.0f;
     rudder_deg = (rudder_adc_last - centre) * (RUDDER_RANGE_DEG / halfSpan);
   }
 
-  // Boot / online / offline state
+  // ----------------------------
+  // Controller status state
+  // ----------------------------
   unsigned long elapsed_boot  = now - boot_start_ms;
   unsigned long since_last_pi = pi_ever_online ? (now - last_pi_frame_ms) : 0;
 
-  bool show_online_splash = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
   bool pi_timed_out       = pi_ever_online && (since_last_pi > PI_OFFLINE_TIMEOUT_MS);
-
   bool pi_never_seen      = !pi_ever_online;
   bool within_boot_window = pi_never_seen && (elapsed_boot < PI_BOOT_EST_MS);
   bool boot_offline       = pi_never_seen && (elapsed_boot >= PI_BOOT_EST_MS);
 
+  // ----------------------------
+  // Draw
+  // ----------------------------
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
-  // ----- Header: "Inno-Pilot V2" in bold-ish -----
+  // Line 1: permanent controller status
   display.setCursor(0, 0);
-  display.print(F("Inno-Pilot "));
-  display.print(INNOPILOT_VERSION);
 
-  // draw again 1px lower to fake bold
-  display.setCursor(0, 1);
-  display.print(F("Inno-Pilot "));
-  display.print(INNOPILOT_VERSION);
-
-  // draw again 1px right to fake extra-bold
-  display.setCursor(1, 0);
-  display.print(F("Inno-Pilot "));
-  display.print(INNOPILOT_VERSION);
-
-  // draw again 1px lower to fake extra-bold
-  display.setCursor(1, 1);
-  display.print(F("Inno-Pilot "));
-  display.print(INNOPILOT_VERSION);
-
-  const uint8_t LINE2_Y = 10;
-
-  // ----- Online splash (Pi just came online) -----
-  if (show_online_splash) {
-    display.setCursor(0, LINE2_Y);
-    display.println(F("Inno-Controller"));
-    display.setCursor(0, LINE2_Y + 10);
-    display.println(F("On-line..."));
-    display.display();
-    return;
+  if (within_boot_window) {
+    uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
+    if (pct > 100) pct = 100;
+    // tight formatting so it fits: "Inno-Cntl:Booting100%"
+    display.print(F("Inno-Cntl:Booting"));
+    display.print(pct);
+    display.print(F("%"));
+  } else if (boot_offline || pi_timed_out) {
+    display.print(F("Inno-Cntl: Off-line"));
+  } else {
+    display.print(F("Inno-Cntl: On-line"));
   }
 
-  // ----- Overlay: big transient button feedback -----
+  // Overlay (big transient button feedback) – leave bottom line off during overlay
   if (overlay_active) {
     if (now - overlay_start_ms < OVERLAY_DURATION_MS) {
-      // Draw the header (already done above), then big centered text
       display.setTextSize(3);
 
       uint8_t len = strlen(overlay_text);
-      int16_t char_w = 6 * 3;  // 6px * size 3
+      int16_t char_w = 6 * 3;
       int16_t text_w = len * char_w;
       int16_t x = (SCREEN_WIDTH - text_w) / 2;
       if (x < 0) x = 0;
 
-      int16_t y = 20;  // somewhere below the header
+      // below the status line
+      int16_t y = 20;
       display.setCursor(x, y);
       display.println(overlay_text);
 
@@ -541,44 +529,24 @@ void oled_draw() {
     }
   }
 
-  // ----- Booting (Pi never seen yet, within boot window) -----
-  if (within_boot_window) {
-    uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
+  // Always keep V/A/C pinned to the bottom (even during boot/offline)
+  display.setCursor(0, 52);
+  display.print(vbuf);
+  display.print(F("  "));
+  display.print(ibuf);
+  display.print(F("  "));
+  display.print(tbuf);
 
-    display.setCursor(0, LINE2_Y);
-    display.println(F("Inno-Controller"));
-    display.setCursor(0, LINE2_Y + 10);
-    display.print(F("Booting "));
-    display.print(pct);
-    display.println(F("%"));
-
+  // If booting/offline, don’t shuffle other lines around—just show bottom line.
+  if (within_boot_window || boot_offline || pi_timed_out) {
     display.display();
     return;
   }
 
-  // ----- Controller offline (either never seen after boot, or went silent) -----
-  if (boot_offline || pi_timed_out) {
-    display.setCursor(0, LINE2_Y);
-    display.println(F("Inno-Cntl: Off-line"));
-
-    // Still show Vin/I so user sees some life
-    display.setCursor(0, LINE2_Y + 10);
-    display.print(F("Vin: "));
-    display.print(vin, 1);
-    display.print(F("V  I: "));
-    display.print(ia, 2);
-    display.print(F("A"));
-
-    display.display();
-    return;
-  }
-
-  // ----- Normal telemetry display (Pi online and not timed-out) -----
-  display.setTextSize(1);
-
-  // Fault line (Pi voltage and/or overtemp)
+  // Online-only info at fixed positions (no jumping)
+  // y=12: faults (optional)
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    display.setCursor(0, LINE2_Y);
+    display.setCursor(0, 12);
     display.print(F("FAULT: "));
     if (pi_overvolt_fault) {
       display.print(F("PiV HIGH"));
@@ -589,29 +557,18 @@ void oled_draw() {
     }
   }
 
-  // Engaged / Clutch
-  display.setCursor(0, LINE2_Y + 10);
+  // y=24: AP + clutch
+  display.setCursor(0, 24);
   display.print(F("AP: "));
   display.print(ap_display ? F("ON") : F("Off"));
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Main Vin & current (left side line if you want, or we can rely on right column only)
-  // Here we use the bottom line for rudder instead.
-
-  // Rudder angle line (just above the bottom)
-  display.setCursor(0, LINE2_Y + 30);
+  // y=36: Rudder
+  display.setCursor(0, 36);
   display.print(F("Rudder: "));
-  display.print(rudder_deg, 1);   // one decimal
+  display.print(rudder_deg, 1);
   display.print(F(" deg"));
-
-  // Bottom line: Vin / I / Temp in one row
-  display.setCursor(0, 52);
-  display.print(vbuf);   // e.g. "12.8V"
-  display.print(F("  "));
-  display.print(ibuf);   // e.g. "0.42A"
-  display.print(F("  "));
-  display.print(tbuf);   // e.g. "31.2C"
 
   display.display();
 }
@@ -1183,4 +1140,5 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
