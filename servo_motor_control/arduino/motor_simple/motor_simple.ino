@@ -125,6 +125,7 @@ bool oled_ok = false;
 const int RUDDER_ADC_PORT_END  = 711;   // ADC at port end
 const int RUDDER_ADC_STBD_END  = 153;   // ADC at starboard end
 const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
+const int RUDDER_ADC_END_HYST  = 8;    // extra counts to CLEAR end-latch (prevents flicker)
 
 // Tolerance for centring (not used here but handy later)
 const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END) / 2;
@@ -560,6 +561,7 @@ void oled_draw() {
 
   // Online-only info at fixed positions (no jumping)
   // y=12: faults (optional)
+  const uint8_t LINE2_Y = 12;
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
     display.setCursor(0, 12);
     display.print(F("FAULT: "));
@@ -649,11 +651,51 @@ void update_motor_from_command() {
     return;
   }
 
-  bool at_port_end = port_limit_switch_hit() ||
-                     (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
+  // Enter thresholds (near the ends)
+  bool at_port_enter = port_limit_switch_hit() ||
+                       (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
 
-  bool at_stbd_end = stbd_limit_switch_hit() ||
-                     (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
+  bool at_stbd_enter = stbd_limit_switch_hit() ||
+                       (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
+
+  // Exit thresholds (must move further away before we clear the latch)
+  // PORT end is high ADC: we "hold" port-end while ADC >= port_exit
+  // STBD end is low  ADC: we "hold" stbd-end while ADC <= stbd_exit
+  int port_exit = RUDDER_ADC_PORT_END - (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+  int stbd_exit = RUDDER_ADC_STBD_END + (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+
+  bool at_port_hold = port_limit_switch_hit() || (a >= port_exit);
+  bool at_stbd_hold = stbd_limit_switch_hit() || (a <= stbd_exit);
+
+  // Latch ensures only one end is active; hysteresis prevents flicker/reset on jitter.
+  static uint8_t end_latch = 0;  // 0 none, 1 port, 2 stbd
+
+  switch (end_latch) {
+    case 0:
+      if (at_port_enter && !at_stbd_enter) {
+        end_latch = 1;
+      } else if (at_stbd_enter && !at_port_enter) {
+        end_latch = 2;
+      } else if (at_port_enter && at_stbd_enter) {
+        // If both appear "true" (noise / overlap), pick the closer end.
+        int dist_port = abs(a - RUDDER_ADC_PORT_END);
+        int dist_stbd = abs(a - RUDDER_ADC_STBD_END);
+        end_latch = (dist_port <= dist_stbd) ? 1 : 2;
+      }
+      break;
+
+    case 1:
+      // Stay latched until we've moved away past the EXIT threshold
+      if (!at_port_hold) end_latch = 0;
+      break;
+
+    case 2:
+      if (!at_stbd_hold) end_latch = 0;
+      break;
+  }
+
+  bool at_port_end = (end_latch == 1) && at_port_hold;
+  bool at_stbd_end = (end_latch == 2) && at_stbd_hold;
 
   // Update rudder fault flags (as before)
   if (at_port_end) {
@@ -1181,6 +1223,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
