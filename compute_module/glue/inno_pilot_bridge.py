@@ -223,8 +223,8 @@ def main():
             # rudder limits (derive from rudder.range if available)
             # pypilot uses rudder.range as a symmetric limit (±range). If you later move to min/max, we’ll adjust.
             if rudder_range is not None:
-                port_lim = abs(rudder_range)          # +degrees
-                stbd_lim = -abs(rudder_range)         # -degrees
+                port_lim = -abs(rudder_range)         # port (negative)
+                stbd_lim =  abs(rudder_range)         # starboard (positive)
                 nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, s16_deg10(port_lim)))
                 nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, s16_deg10(stbd_lim)))
 

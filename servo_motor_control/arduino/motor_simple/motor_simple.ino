@@ -34,8 +34,9 @@ bool pi_online_at_boot = false;
 const uint8_t PILOT_HEADING_CODE = 0xE2; // ap.heading * 10 (uint16)
 const uint8_t PILOT_COMMAND_CODE = 0xE3; // ap.heading_command * 10 (uint16)
 const uint8_t PILOT_RUDDER_CODE  = 0xE4; // rudder.angle * 10 (int16, two's complement)
-const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit deg * 10 (int16)
-const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit deg * 10 (int16)
+// Bridge->Nano: pypilot rudder limits (tenths of degrees)
+const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit * 10 (int16)
+const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit * 10 (int16)
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -47,6 +48,7 @@ uint16_t pilot_command_deg10 = 0;
 bool     pilot_rudder_valid  = false;
 int16_t  pilot_rudder_deg10  = 0;
 
+// Rudder limits from pypilot (tenths of degrees)
 bool     pilot_port_lim_valid = false;
 int16_t  pilot_port_lim_deg10 = 0;
 
@@ -599,12 +601,20 @@ void oled_draw() {
   if (pilot_command_valid) display.print(pilot_command_deg10 / 10.0f, 1);
   else display.print(F("--.-"));
 
-  // Rudder compare (Nano vs Pypilot)
   display.setCursor(0, LINE2_Y + 30);
-  display.print(F("Rud N:"));
-  display.print(rudder_deg, 1);
-  display.print(F(" P:"));
+  display.print(F("Rud:"));
+
+  if (pilot_port_lim_valid) display.print(pilot_port_lim_deg10 / 10.0f, 1);
+  else display.print(F("--.-"));
+
+  display.print(F(" "));
+
   if (pilot_rudder_valid) display.print(pilot_rudder_deg10 / 10.0f, 1);
+  else display.print(F("--.-"));
+
+  display.print(F(" "));
+
+  if (pilot_stbd_lim_valid) display.print(pilot_stbd_lim_deg10 / 10.0f, 1);
   else display.print(F("--.-"));
 
   display.display();
