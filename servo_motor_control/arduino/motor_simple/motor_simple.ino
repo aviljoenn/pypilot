@@ -573,19 +573,12 @@ void oled_draw() {
   }
 
   // Online-only info at fixed positions (no jumping)
-  // y=12: faults (optional)
+  // DEBUG: show Nano rudder ADC on line 2 (y=12) for diagnostics.
+  // TODO(undo-debug): remove this block to restore the FAULT line here when asked.
   const uint8_t LINE2_Y = 12;
-  if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    display.setCursor(0, 12);
-    display.print(F("FAULT: "));
-    if (pi_overvolt_fault) {
-      display.print(F("PiV HIGH"));
-    } else if (pi_undervolt_fault) {
-      display.print(F("PiV LOW"));
-    } else if (flags & OVERTEMP_FAULT) {
-      display.print(F("TEMP"));
-    }
-  }
+  display.setCursor(0, LINE2_Y);
+  display.print(F("RudADC: "));
+  display.print(rudder_adc_last);
 
   // y=24: AP + clutch
   display.setCursor(0, 24);
