@@ -108,7 +108,7 @@ const float MAX_CONTROLLER_TEMP_C = 50.0f;
 
 // Manual jog state (used when AP is disengaged)
 bool  manual_override = false;  // true while a manual jog is active
-int8_t manual_dir     = 0;      // -1 = starboard, +1 = port, 0 = none
+int8_t manual_dir     = 0;      // -1 = port, +1 = starboard, 0 = none
 
 // Current calibration points: ADC reading vs measured amps
 const uint8_t  CURR_N = 8;
@@ -132,8 +132,8 @@ bool oled_ok = false;
 
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
-const int RUDDER_ADC_PORT_END  = 711;   // ADC at port end
-const int RUDDER_ADC_STBD_END  = 153;   // ADC at starboard end
+const int RUDDER_ADC_PORT_END  = 153;   // ADC at port end (lower = port)
+const int RUDDER_ADC_STBD_END  = 711;   // ADC at starboard end (higher = stbd)
 const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
 const int RUDDER_ADC_END_HYST  = 8;    // extra counts to CLEAR end-latch (prevents flicker)
 
@@ -493,7 +493,7 @@ void oled_draw() {
   float rudder_deg = 0.0f;
   {
     float centre   = 0.5f * (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END);
-    float halfSpan = 0.5f * (RUDDER_ADC_PORT_END - RUDDER_ADC_STBD_END);
+    float halfSpan = 0.5f * (RUDDER_ADC_STBD_END - RUDDER_ADC_PORT_END);
     if (halfSpan < 1.0f) halfSpan = 1.0f;
     rudder_deg = (rudder_adc_last - centre) * (RUDDER_RANGE_DEG / halfSpan);
   }
@@ -672,19 +672,19 @@ void update_motor_from_command() {
 
   // Enter thresholds (near the ends)
   bool at_port_enter = port_limit_switch_hit() ||
-                       (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
+                       (a <= (RUDDER_ADC_PORT_END + RUDDER_ADC_MARGIN));
 
   bool at_stbd_enter = stbd_limit_switch_hit() ||
-                       (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
+                       (a >= (RUDDER_ADC_STBD_END - RUDDER_ADC_MARGIN));
 
   // Exit thresholds (must move further away before we clear the latch)
-  // PORT end is high ADC: we "hold" port-end while ADC >= port_exit
-  // STBD end is low  ADC: we "hold" stbd-end while ADC <= stbd_exit
-  int port_exit = RUDDER_ADC_PORT_END - (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
-  int stbd_exit = RUDDER_ADC_STBD_END + (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+  // PORT end is low  ADC: we "hold" port-end while ADC <= port_exit
+  // STBD end is high ADC: we "hold" stbd-end while ADC >= stbd_exit
+  int port_exit = RUDDER_ADC_PORT_END + (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+  int stbd_exit = RUDDER_ADC_STBD_END - (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
 
-  bool at_port_hold = port_limit_switch_hit() || (a >= port_exit);
-  bool at_stbd_hold = stbd_limit_switch_hit() || (a <= stbd_exit);
+  bool at_port_hold = port_limit_switch_hit() || (a <= port_exit);
+  bool at_stbd_hold = stbd_limit_switch_hit() || (a >= stbd_exit);
 
   // Latch ensures only one end is active; hysteresis prevents flicker/reset on jitter.
   static uint8_t end_latch = 0;  // 0 none, 1 port, 2 stbd
@@ -732,14 +732,14 @@ void update_motor_from_command() {
   // ---- Manual override branch (AP disengaged) ----
   if (manual_override) {
     // Respect limits
-    if (manual_dir > 0 && at_port_end) {
+    if (manual_dir < 0 && at_port_end) {
       // Trying to jog further to port, but at/near port end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
-    if (manual_dir < 0 && at_stbd_end) {
+    if (manual_dir > 0 && at_stbd_end) {
       // Trying to jog further to stbd, but at/near stbd end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -750,11 +750,11 @@ void update_motor_from_command() {
     const uint8_t duty = 255;  // full duty for now; you can tune later
 
     if (manual_dir > 0) {
-      // PORT: increase ADC
+      // STBD: increase ADC
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
     } else if (manual_dir < 0) {
-      // STBD: decrease ADC
+      // PORT: decrease ADC
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
     } else {
@@ -793,13 +793,13 @@ void update_motor_from_command() {
   }
 
   // Don't drive further into soft limits
-  if (delta > 0 && at_port_end) {
+  if (delta > 0 && at_stbd_end) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
-  if (delta < 0 && at_stbd_end) {
+  if (delta < 0 && at_port_end) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -826,7 +826,7 @@ void update_motor_from_command() {
     duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
   }
 
-  // Direction: delta > 0 => PORT (increase ADC), delta < 0 => STBD (decrease ADC)
+  // Direction: delta > 0 => STBD (increase ADC), delta < 0 => PORT (decrease ADC)
   if (delta > 0) {
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
@@ -1113,13 +1113,13 @@ if (stable_b != last_stable_button) {
 // If AP is disengaged, use buttons as manual jog
 if (!ap_engaged) {
   if (stable_b == BTN_B1 || stable_b == BTN_B2) {
-    // Define B1/B2 as starboard jog (negative direction)
-    manual_override = true;
-    manual_dir      = -1;
-  } else if (stable_b == BTN_B4 || stable_b == BTN_B5) {
-    // Define B4/B5 as port jog (positive direction)
+    // Define B1/B2 as starboard jog (positive direction)
     manual_override = true;
     manual_dir      = +1;
+  } else if (stable_b == BTN_B4 || stable_b == BTN_B5) {
+    // Define B4/B5 as port jog (negative direction)
+    manual_override = true;
+    manual_dir      = -1;
   }
 }
 
