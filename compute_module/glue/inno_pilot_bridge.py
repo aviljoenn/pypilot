@@ -89,7 +89,8 @@ def main():
     client.watch('imu.heading', True)
     client.watch('ap.heading_command', True)
     client.watch('rudder.angle', True)
-    client.watch('rudder.range', True)
+    # Periodic watch so updated calibration shows up without a restart.
+    client.watch('rudder.range', 1.0)
     client.watch('ap.heading', True)
 
     ap_enabled = None
@@ -175,8 +176,8 @@ def main():
         
         # limits derived from rudder.range (0xE5 port, 0xE6 stbd)
         if rudder_range is not None:
-            port_lim = -abs(rudder_range)
-            stbd_lim = abs(rudder_range)
+            port_lim = abs(rudder_range)
+            stbd_lim = -abs(rudder_range)
             nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim)))
             nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim)))
     
