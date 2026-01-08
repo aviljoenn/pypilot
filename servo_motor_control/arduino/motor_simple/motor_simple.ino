@@ -171,6 +171,7 @@ enum commands {
 
 // ---- Forward declarations ----
 uint16_t read_rudder_scaled();
+int read_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
 
@@ -617,9 +618,15 @@ void oled_draw() {
 
 // Read rudder pot and scale to 0..65535 for telemetry
 uint16_t read_rudder_scaled() {
-  int a = analogRead(RUDDER_PIN);   // 0..1023
+  int a = read_rudder_adc();   // 0..1023 (inverted so higher = starboard)
   rudder_adc_last = a;              // save raw for limit logic
   return (uint16_t)a * 64;          // 0..~65472
+}
+
+int read_rudder_adc() {
+  // Invert ADC so higher counts always mean starboard movement.
+  int raw = analogRead(RUDDER_PIN);   // 0..1023 (hardware polarity)
+  return 1023 - raw;
 }
 
 // ---- Limit logic helpers ----
@@ -642,7 +649,7 @@ bool stbd_limit_switch_hit() {
 // ---- Motor + clutch drive based on last_command_val & flags ----
 void update_motor_from_command() {
   // Always update rudder ADC for limit logic
-  int a = analogRead(RUDDER_PIN);   // 0..1023
+  int a = read_rudder_adc();   // 0..1023 (inverted so higher = starboard)
   rudder_adc_last = a;
   
   unsigned long now = millis();
@@ -653,8 +660,13 @@ void update_motor_from_command() {
                          pilot_port_lim_valid &&
                          pilot_stbd_lim_valid &&
                          (pilot_port_lim_deg10 < pilot_stbd_lim_deg10);
-  bool at_port_pilot = pilot_limits_ok && (pilot_rudder_deg10 <= pilot_port_lim_deg10);
-  bool at_stbd_pilot = pilot_limits_ok && (pilot_rudder_deg10 >= pilot_stbd_lim_deg10);
+  const int16_t PILOT_LIMIT_HYST_DEG10 = 5;  // 0.5 deg hysteresis to avoid jitter
+  bool at_port_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 <= pilot_port_lim_deg10);
+  bool at_stbd_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 >= pilot_stbd_lim_deg10);
+  int16_t port_pilot_exit = pilot_port_lim_deg10 + PILOT_LIMIT_HYST_DEG10;
+  int16_t stbd_pilot_exit = pilot_stbd_lim_deg10 - PILOT_LIMIT_HYST_DEG10;
+  bool at_port_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 <= port_pilot_exit);
+  bool at_stbd_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 >= stbd_pilot_exit);
 
   // Clutch engages when AP is enabled remotely OR manual jog is active.
   // Safety: clutch forced OFF during pi_fault or overtemp.
@@ -717,6 +729,38 @@ void update_motor_from_command() {
 
   bool at_port_end = (end_latch == 1) && at_port_hold;
   bool at_stbd_end = (end_latch == 2) && at_stbd_hold;
+
+  // Pilot limit latch mirrors the ADC end latch to avoid jitter around calibrated limits.
+  static uint8_t pilot_latch = 0;  // 0 none, 1 port, 2 stbd
+
+  if (!pilot_limits_ok) {
+    pilot_latch = 0;
+  } else {
+    switch (pilot_latch) {
+      case 0:
+        if (at_port_pilot_enter && !at_stbd_pilot_enter) {
+          pilot_latch = 1;
+        } else if (at_stbd_pilot_enter && !at_port_pilot_enter) {
+          pilot_latch = 2;
+        } else if (at_port_pilot_enter && at_stbd_pilot_enter) {
+          int dist_port = abs(pilot_rudder_deg10 - pilot_port_lim_deg10);
+          int dist_stbd = abs(pilot_rudder_deg10 - pilot_stbd_lim_deg10);
+          pilot_latch = (dist_port <= dist_stbd) ? 1 : 2;
+        }
+        break;
+
+      case 1:
+        if (!at_port_pilot_hold) pilot_latch = 0;
+        break;
+
+      case 2:
+        if (!at_stbd_pilot_hold) pilot_latch = 0;
+        break;
+    }
+  }
+
+  bool at_port_pilot = (pilot_latch == 1) && at_port_pilot_hold;
+  bool at_stbd_pilot = (pilot_latch == 2) && at_stbd_pilot_hold;
 
   // Update rudder fault flags (as before)
   if (at_port_end) {
@@ -795,13 +839,13 @@ void update_motor_from_command() {
   }
 
   // Don't drive further into soft limits
-  if (delta > 0 && at_stbd_end) {
+  if (delta > 0 && (at_stbd_end || at_stbd_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
-  if (delta < 0 && at_port_end) {
+  if (delta < 0 && (at_port_end || at_port_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
