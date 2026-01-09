@@ -119,6 +119,8 @@ def main():
 
         # ---- Pump pypilot client + update cached values ----
         msgs = client.receive(0)  # non-blocking
+        if msgs:
+            print(f"[pypilot] {msgs}")
         if "ap.enabled" in msgs:
             try:
                 ap_enabled = bool(msgs["ap.enabled"])
