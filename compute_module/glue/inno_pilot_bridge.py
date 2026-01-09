@@ -46,8 +46,8 @@ BRIDGE_HELLO_CODE = 0xF0
 BRIDGE_HELLO_ACK_CODE = 0xF1
 BRIDGE_HELLO_VALUE = 0xBEEF
 PROBE_INITIAL_DELAY_S = 1.0
-PROBE_RETRIES = 3
-PROBE_RETRY_DELAY_S = 2.0
+PROBE_RETRIES = 5
+PROBE_RETRY_DELAY_S = 3.0
 
 def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
     """CRC-8 MSB-first, poly 0x31, init 0xFF (matches Arduino crc8)."""
