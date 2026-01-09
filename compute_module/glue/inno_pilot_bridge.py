@@ -86,8 +86,6 @@ def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
 def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
     try:
         with serial.Serial(port, BAUD, timeout=0.1) as probe:
-            probe.reset_input_buffer()
-            time.sleep(0.05)
             probe.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
             buf = bytearray()
             deadline = time.monotonic() + timeout_s
@@ -110,7 +108,9 @@ def find_nano_port() -> str:
     if os.path.isdir(by_id):
         for entry in sorted(os.listdir(by_id)):
             path = os.path.join(by_id, entry)
-            if os.path.islink(path) and entry.endswith(".real"):
+            if os.path.islink(path):
+                if os.path.realpath(path) == "/dev/ttyINNOPILOT":
+                    continue
                 candidates.append(path)
     if NANO_PORT not in candidates and os.path.exists(NANO_PORT):
         candidates.append(NANO_PORT)
@@ -321,7 +321,7 @@ def main():
         except serial.serialutil.SerialException as exc:
             print("ERROR: Nano serial read failed.")
             print(f"Exception: {exc}")
-            print(f"NANO_PORT: {nano_port}")
+            print(f"NANO_PORT: {NANO_PORT}")
             print(f"PILOT_PORT: {PILOT_PORT}")
             print(f"BAUD: {BAUD}")
             print(f"Nano is_open: {getattr(nano, 'is_open', None)}")
