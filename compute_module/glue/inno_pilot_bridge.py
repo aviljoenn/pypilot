@@ -153,6 +153,9 @@ def enc_deg10_i16(deg: float) -> int:
     if v >  32767: v =  32767
     return v & 0xFFFF  # two's complement for Nano side
 
+def log_packet(direction: str, description: str) -> None:
+    print(f"[bridge] {direction}: {description}")
+
 def main():
     # pypilot TCP client
     client = pypilotClient()
@@ -188,14 +191,13 @@ def main():
     last_ap_sent = None
     last_ap_sent_ts = 0.0
     last_telem_ts = 0.0
+    last_heading_cmd_sent = None
 
     while True:
         now = time.monotonic()
 
         # ---- Pump pypilot client + update cached values ----
         msgs = client.receive(0)  # non-blocking
-        if msgs:
-            print(f"[pypilot] {msgs}")
         if "ap.enabled" in msgs:
             try:
                 ap_enabled = bool(msgs["ap.enabled"])
@@ -237,6 +239,8 @@ def main():
             need_send = (last_ap_sent is None) or (ap_enabled != last_ap_sent) or ((now - last_ap_sent_ts) >= AP_STATE_PERIOD_S)
             if need_send:
                 send_nano_frame(nano, AP_ENABLED_CODE, 1 if ap_enabled else 0)
+                if last_ap_sent is None or ap_enabled != last_ap_sent:
+                    log_packet("Pypilot -> Nano", "ap.enabled state change")
                 last_ap_sent = ap_enabled
                 last_ap_sent_ts = now
                 
@@ -246,6 +250,9 @@ def main():
         
         if heading_cmd is not None:
             send_nano_frame(nano, PILOT_COMMAND_CODE, int(round(heading_cmd * 10)) & 0xFFFF)
+            if last_heading_cmd_sent is None or heading_cmd != last_heading_cmd_sent:
+                log_packet("Pypilot -> Nano", "heading command change")
+                last_heading_cmd_sent = heading_cmd
         
         # rudder angle (0xE4) signed deg*10
         if rudder_angle is not None:
@@ -349,6 +356,7 @@ def main():
 
                 # handle button events
                 if code == BUTTON_EVENT_CODE:
+                    log_packet("Nano -> API", "BUTTON_EVENT_CODE (0xE0)")
                     try:
                         if value == BTN_EVT_TOGGLE:
                             target = True if ap_enabled is None else (not ap_enabled)
