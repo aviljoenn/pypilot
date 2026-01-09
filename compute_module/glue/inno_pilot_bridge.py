@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+import os
 import time
 import serial
 from pypilot.client import pypilotClient  # watch/receive/set
 
 # Serial devices
-NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"  # real Nano USB serial
+NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"  # real Nano USB serial (fallback)
 PILOT_PORT = "/dev/ttyINNOPILOT_BRIDGE"                               # PTY side that talks to pypilot
 BAUD       = 38400
 
@@ -38,6 +39,13 @@ PILOT_RUDDER_CODE   = 0xE4  # rudder.angle * 10 (int16 in two's complement)
 AP_STATE_PERIOD_S = 0.5
 TELEM_PERIOD_S    = 0.2  # heading/command/rudder
 
+# Bridge <-> Nano framing (camouflage to prevent direct pypilot probe)
+BRIDGE_MAGIC1 = 0xA5
+BRIDGE_MAGIC2 = 0x5A
+BRIDGE_HELLO_CODE = 0xF0
+BRIDGE_HELLO_ACK_CODE = 0xF1
+BRIDGE_HELLO_VALUE = 0xBEEF
+
 def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
     """CRC-8 MSB-first, poly 0x31, init 0xFF (matches Arduino crc8)."""
     crc = init
@@ -55,6 +63,63 @@ def build_frame(code: int, value_u16: int) -> bytes:
     hi = (value_u16 >> 8) & 0xFF
     body = bytes([code, lo, hi])
     return body + bytes([crc8_msb(body)])
+
+def wrap_frame(frame: bytes) -> bytes:
+    return bytes([BRIDGE_MAGIC1, BRIDGE_MAGIC2]) + frame
+
+def send_nano_frame(nano: serial.Serial, code: int, value_u16: int) -> None:
+    nano.write(wrap_frame(build_frame(code, value_u16)))
+
+def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
+    frames: list[bytes] = []
+    while len(buf) >= 2:
+        if buf[0] != BRIDGE_MAGIC1 or buf[1] != BRIDGE_MAGIC2:
+            del buf[0]
+            continue
+        if len(buf) < 6:
+            break
+        frame = bytes(buf[2:6])
+        del buf[:6]
+        frames.append(frame)
+    return frames
+
+def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
+    try:
+        with serial.Serial(port, BAUD, timeout=0.1) as probe:
+            probe.reset_input_buffer()
+            time.sleep(0.05)
+            probe.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
+            buf = bytearray()
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                chunk = probe.read(64)
+                if chunk:
+                    buf.extend(chunk)
+                    for frame in extract_wrapped_frames(buf):
+                        code = frame[0]
+                        value = frame[1] | (frame[2] << 8)
+                        if code == BRIDGE_HELLO_ACK_CODE and value == BRIDGE_HELLO_VALUE:
+                            return True
+            return False
+    except Exception:
+        return False
+
+def find_nano_port() -> str:
+    by_id = "/dev/serial/by-id"
+    candidates: list[str] = []
+    if os.path.isdir(by_id):
+        for entry in sorted(os.listdir(by_id)):
+            path = os.path.join(by_id, entry)
+            if os.path.islink(path) and entry.endswith(".real"):
+                candidates.append(path)
+    if NANO_PORT not in candidates and os.path.exists(NANO_PORT):
+        candidates.append(NANO_PORT)
+
+    for candidate in candidates:
+        if probe_nano_port(candidate):
+            return candidate
+
+    raise RuntimeError(f"Unable to find Nano on serial ports: {candidates}")
 
 def to_u16_signed(v: int) -> int:
     return v & 0xFFFF
@@ -104,11 +169,13 @@ def main():
     pilot_rudder  = None
 
     # Open serial ports
-    nano  = serial.Serial(NANO_PORT,  BAUD, timeout=0.01)
+    nano_port = find_nano_port()
+    nano  = serial.Serial(nano_port,  BAUD, timeout=0.01)
     pilot = serial.Serial(PILOT_PORT, BAUD, timeout=0.01)
 
-    # Buffer for Nano->pilot frames
-    frame_buf = bytearray()
+    # Buffers for framed transport
+    nano_buf = bytearray()
+    pilot_buf = bytearray()
 
     last_ap_sent = None
     last_ap_sent_ts = 0.0
@@ -119,6 +186,8 @@ def main():
 
         # ---- Pump pypilot client + update cached values ----
         msgs = client.receive(0)  # non-blocking
+        if msgs:
+            print(f"[pypilot] {msgs}")
         if "ap.enabled" in msgs:
             try:
                 ap_enabled = bool(msgs["ap.enabled"])
@@ -159,27 +228,27 @@ def main():
         if ap_enabled is not None:
             need_send = (last_ap_sent is None) or (ap_enabled != last_ap_sent) or ((now - last_ap_sent_ts) >= AP_STATE_PERIOD_S)
             if need_send:
-                nano.write(build_frame(AP_ENABLED_CODE, 1 if ap_enabled else 0))
+                send_nano_frame(nano, AP_ENABLED_CODE, 1 if ap_enabled else 0)
                 last_ap_sent = ap_enabled
                 last_ap_sent_ts = now
                 
         # heading (0xE2) and command (0xE3) in deg*10
         if ap_heading is not None:
-            nano.write(build_frame(PILOT_HEADING_CODE, int(round(ap_heading * 10)) & 0xFFFF))
+            send_nano_frame(nano, PILOT_HEADING_CODE, int(round(ap_heading * 10)) & 0xFFFF)
         
         if heading_cmd is not None:
-            nano.write(build_frame(PILOT_COMMAND_CODE, int(round(heading_cmd * 10)) & 0xFFFF))
+            send_nano_frame(nano, PILOT_COMMAND_CODE, int(round(heading_cmd * 10)) & 0xFFFF)
         
         # rudder angle (0xE4) signed deg*10
         if rudder_angle is not None:
-            nano.write(build_frame(PILOT_RUDDER_CODE, int(round(rudder_angle * 10)) & 0xFFFF))
+            send_nano_frame(nano, PILOT_RUDDER_CODE, int(round(rudder_angle * 10)) & 0xFFFF)
         
         # limits derived from rudder.range (0xE5 port, 0xE6 stbd)
         if rudder_range is not None:
             port_lim = abs(rudder_range)
             stbd_lim = -abs(rudder_range)
-            nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim)))
-            nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim)))
+            send_nano_frame(nano, PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim))
+            send_nano_frame(nano, PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim))
     
         # ---- Push extra telemetry down to Nano (periodic) ----
         # Keep this lightweight; we send at most once per loop tick here.
@@ -211,15 +280,15 @@ def main():
 
             # imu.heading
             if pilot_heading is not None:
-                nano.write(build_frame(PILOT_HEADING_CODE, deg10_heading(pilot_heading)))
+                send_nano_frame(nano, PILOT_HEADING_CODE, deg10_heading(pilot_heading))
 
             # ap.heading_command
             if heading_cmd is not None:
-                nano.write(build_frame(PILOT_COMMAND_CODE, deg10_heading(heading_cmd)))
+                send_nano_frame(nano, PILOT_COMMAND_CODE, deg10_heading(heading_cmd))
 
             # rudder.angle
             if pilot_rudder is not None:
-                nano.write(build_frame(PILOT_RUDDER_CODE, s16_deg10(pilot_rudder)))
+                send_nano_frame(nano, PILOT_RUDDER_CODE, s16_deg10(pilot_rudder))
 
 
 
@@ -229,29 +298,41 @@ def main():
             last_telem_ts = now
 
             if heading is not None:
-                nano.write(build_frame(PILOT_HEADING_CODE, enc_deg10_u16(heading)))
+                send_nano_frame(nano, PILOT_HEADING_CODE, enc_deg10_u16(heading))
 
             if heading_cmd is not None:
-                nano.write(build_frame(PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd)))
+                send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
 
             if rudder_angle is not None:
-                nano.write(build_frame(PILOT_RUDDER_CODE, enc_deg10_i16(rudder_angle)))
+                send_nano_frame(nano, PILOT_RUDDER_CODE, enc_deg10_i16(rudder_angle))
 
         # ---- Data from pypilot -> Nano ----
         data_from_pilot = pilot.read(256)
         if data_from_pilot:
-            nano.write(data_from_pilot)
+            pilot_buf.extend(data_from_pilot)
+            while len(pilot_buf) >= 4:
+                raw_frame = bytes(pilot_buf[:4])
+                del pilot_buf[:4]
+                nano.write(wrap_frame(raw_frame))
 
         # ---- Data from Nano -> pypilot ----
-        data_from_nano = nano.read(256)
+        try:
+            data_from_nano = nano.read(256)
+        except serial.serialutil.SerialException as exc:
+            print("ERROR: Nano serial read failed.")
+            print(f"Exception: {exc}")
+            print(f"NANO_PORT: {nano_port}")
+            print(f"PILOT_PORT: {PILOT_PORT}")
+            print(f"BAUD: {BAUD}")
+            print(f"Nano is_open: {getattr(nano, 'is_open', None)}")
+            print(f"Nano in_waiting: {getattr(nano, 'in_waiting', None)}")
+            print(f"Pilot is_open: {getattr(pilot, 'is_open', None)}")
+            print(f"Pilot in_waiting: {getattr(pilot, 'in_waiting', None)}")
+            raise SystemExit(1) from exc
         if data_from_nano:
-            frame_buf.extend(data_from_nano)
+            nano_buf.extend(data_from_nano)
 
-            # Frames are always 4 bytes in this protocol
-            while len(frame_buf) >= 4:
-                f = bytes(frame_buf[:4])
-                del frame_buf[:4]
-
+            for f in extract_wrapped_frames(nano_buf):
                 code = f[0]
                 value = f[1] | (f[2] << 8)
 

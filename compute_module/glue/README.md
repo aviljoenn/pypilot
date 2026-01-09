@@ -16,6 +16,8 @@ Inno-Pilot servo controller (Nano) to pypilot on the compute module (Pi Zero).
 - Runs a bridge process that:
   - Connects the real Nano USB (`...port0.real`) to `/dev/ttyINNOPILOT_BRIDGE`
   - Forwards all servo frames unchanged
+  - Uses a lightweight magic-byte wrapper between bridge ↔ Nano so pypilot
+    cannot bind directly to the Nano when multiple USB devices are present
   - Listens for `BUTTON_EVENT_CODE` (0xE0) frames from the Nano and translates
     them into pypilot API calls:
     - `ap.enabled` toggle

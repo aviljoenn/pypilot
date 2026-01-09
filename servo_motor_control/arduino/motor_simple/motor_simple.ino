@@ -2,8 +2,8 @@
 // Minimal pypilot-compatible motor controller core
 // - 16 MHz Nano, Serial @ 38400
 // - Uses crc.h (CRC-8 poly 0x31, init 0xFF)
-// - Receives 4-byte frames: [code, value_lo, value_hi, crc]
-// - Sends periodic FLAGS and RUDDER frames
+// - Receives framed 4-byte packets: [MAGIC1, MAGIC2, code, value_lo, value_hi, crc]
+// - Sends periodic FLAGS and RUDDER frames with the same framing
 // - Drives IBT-2 H-bridge + clutch based on COMMAND / DISENGAGE
 // - Obeys limit switches + rudder pot min/max
 
@@ -34,6 +34,11 @@ bool pi_online_at_boot = false;
 const uint8_t PILOT_HEADING_CODE = 0xE2; // ap.heading * 10 (uint16)
 const uint8_t PILOT_COMMAND_CODE = 0xE3; // ap.heading_command * 10 (uint16)
 const uint8_t PILOT_RUDDER_CODE  = 0xE4; // rudder.angle * 10 (int16, two's complement)
+// Bridge framing + handshake (prevents direct pypilot probe binding to Nano)
+const uint8_t BRIDGE_MAGIC1 = 0xA5;
+const uint8_t BRIDGE_MAGIC2 = 0x5A;
+const uint8_t BRIDGE_HELLO_CODE = 0xF0;
+const uint8_t BRIDGE_HELLO_ACK_CODE = 0xF1;
 // Bridge->Nano: pypilot rudder limits (tenths of degrees)
 const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit * 10 (int16)
 const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit * 10 (int16)
@@ -236,6 +241,7 @@ const unsigned long OVERLAY_DURATION_MS = 600UL;  // 0.6s display
 uint8_t  in_bytes[3];
 uint8_t  sync_b        = 0;
 uint8_t  in_sync_count = 0;
+uint8_t  bridge_magic_state = 0;
 
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
@@ -333,13 +339,15 @@ void handle_button(ButtonID b) {
   }
 }
 
-// Helper: send a 4-byte frame [code, value_lo, value_hi, crc]
+// Helper: send a framed 4-byte packet [MAGIC1, MAGIC2, code, value_lo, value_hi, crc]
 void send_frame(uint8_t code, uint16_t value) {
   uint8_t body[3];
   body[0] = code;
   body[1] = value & 0xFF;
   body[2] = (value >> 8) & 0xFF;
   uint8_t c = crc8(body, 3);
+  Serial.write(BRIDGE_MAGIC1);
+  Serial.write(BRIDGE_MAGIC2);
   Serial.write(body, 3);
   Serial.write(c);
 }
@@ -962,6 +970,10 @@ void process_packet() {
       pilot_stbd_lim_valid = true;
       break;
 
+    case BRIDGE_HELLO_CODE:
+      send_frame(BRIDGE_HELLO_ACK_CODE, 0xBEEF);
+      break;
+
     
     default:
       // Unhandled commands ignored for now
@@ -1202,11 +1214,26 @@ if (!ap_engaged) {
     last_command_val = 1000;
   }
 
-  // --- RX: parse incoming pypilot-style frames ---
+  // --- RX: parse incoming framed packets ---
   while (Serial.available()) {
     uint8_t c = Serial.read();
     any_serial_rx = true;
     last_serial_rx_ms = now;
+
+    if (bridge_magic_state == 0) {
+      if (c == BRIDGE_MAGIC1) {
+        bridge_magic_state = 1;
+      }
+      continue;
+    } else if (bridge_magic_state == 1) {
+      if (c == BRIDGE_MAGIC2) {
+        bridge_magic_state = 2;
+        sync_b = 0;
+      } else {
+        bridge_magic_state = 0;
+      }
+      continue;
+    }
 
     if (sync_b < 3) {
       in_bytes[sync_b++] = c;
@@ -1221,16 +1248,15 @@ if (!ap_engaged) {
         } else {
           in_sync_count++;
         }
-        sync_b = 0;
         flags &= ~INVALID;
       } else {
-        // CRC invalid: mark INVALID, shift window by 1 byte
+        // CRC invalid: mark INVALID and resync to magic header
         flags |= INVALID;
         in_sync_count = 0;
-        in_bytes[0] = in_bytes[1];
-        in_bytes[1] = in_bytes[2];
-        in_bytes[2] = c;
       }
+
+      sync_b = 0;
+      bridge_magic_state = 0;
 
       // Only process one frame per loop() iteration
       break;
