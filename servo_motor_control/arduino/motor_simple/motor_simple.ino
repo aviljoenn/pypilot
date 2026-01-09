@@ -246,6 +246,7 @@ uint8_t  bridge_magic_state = 0;
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
 uint16_t last_command_val = 1000;       // 0..2000, 1000 = neutral
+unsigned long last_command_ms = 0;
 uint16_t rudder_raw       = 0;          // 0..65535 (scaled)
 int      rudder_adc_last  = 0;          // 0..1023
 
@@ -678,6 +679,7 @@ void update_motor_from_command() {
   unsigned long now = millis();
   bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
   bool ap_active = ap_enabled_remote && pi_alive;
+  bool command_recent = (now - last_command_ms <= PI_OFFLINE_TIMEOUT_MS);
   bool pilot_limits_ok = pi_alive &&
                          pilot_rudder_valid &&
                          pilot_port_lim_valid &&
@@ -691,9 +693,24 @@ void update_motor_from_command() {
   bool at_port_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 <= port_pilot_exit);
   bool at_stbd_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 >= stbd_pilot_exit);
 
+  int16_t delta = (int16_t)last_command_val - 1000;   // -1000..+1000
+  const int16_t DEADBAND = 20;
+
+  bool manual_jog_active = manual_override;
+  int8_t manual_jog_dir = manual_dir;
+  if (!manual_override && !ap_active && pi_alive && command_recent) {
+    if (delta > DEADBAND) {
+      manual_jog_active = true;
+      manual_jog_dir = +1;
+    } else if (delta < -DEADBAND) {
+      manual_jog_active = true;
+      manual_jog_dir = -1;
+    }
+  }
+
   // Clutch engages when AP is enabled remotely OR manual jog is active.
   // Safety: clutch forced OFF during pi_fault or overtemp.
-  bool clutch_should = (manual_override || ap_active) &&
+  bool clutch_should = (manual_jog_active || ap_active) &&
                        !pi_fault &&
                        !(flags & OVERTEMP_FAULT);
 
@@ -799,16 +816,16 @@ void update_motor_from_command() {
   }
 
   // ---- Manual override branch (AP disengaged) ----
-  if (manual_override) {
+  if (manual_jog_active) {
     // Respect limits
-    if (manual_dir < 0 && (at_port_end || at_port_pilot)) {
+    if (manual_jog_dir < 0 && (at_port_end || at_port_pilot)) {
       // Trying to jog further to port, but at/near port end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
-    if (manual_dir > 0 && (at_stbd_end || at_stbd_pilot)) {
+    if (manual_jog_dir > 0 && (at_stbd_end || at_stbd_pilot)) {
       // Trying to jog further to stbd, but at/near stbd end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -818,11 +835,11 @@ void update_motor_from_command() {
 
     const uint8_t duty = 255;  // full duty for now; you can tune later
 
-    if (manual_dir > 0) {
+    if (manual_jog_dir > 0) {
       // STBD: increase ADC
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-    } else if (manual_dir < 0) {
+    } else if (manual_jog_dir < 0) {
       // PORT: decrease ADC
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
@@ -850,10 +867,7 @@ void update_motor_from_command() {
 
   // ----- Autopilot motor drive from last_command_val -----
   // last_command_val: 0..2000, 1000 = stop
-  int16_t delta = (int16_t)last_command_val - 1000;   // -1000..+1000
-
   // Deadband around neutral
-  const int16_t DEADBAND = 20;
   if (delta > -DEADBAND && delta < DEADBAND) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -930,6 +944,7 @@ void process_packet() {
     case COMMAND_CODE:
       // 0..2000, 1000 = neutral
       last_command_val = value;
+      last_command_ms = now;
       break;
 
     case DISENGAGE_CODE:
@@ -947,7 +962,6 @@ void process_packet() {
         flags |= ENGAGED;
       } else {
         flags &= ~ENGAGED;
-        last_command_val = 1000;  // neutral when AP disabled
       }
       
       // If we are not in an override window, follow remote immediately.
