@@ -49,6 +49,22 @@ PROBE_INITIAL_DELAY_S = 1.0
 PROBE_RETRIES = 5
 PROBE_RETRY_DELAY_S = 3.0
 
+def open_serial_no_reset(port: str, baud: int, timeout: float) -> serial.Serial:
+    """Open serial port while keeping DTR/RTS low to reduce Arduino resets."""
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baud
+    ser.timeout = timeout
+    ser.dsrdtr = False
+    ser.rtscts = False
+    ser.open()
+    try:
+        ser.dtr = False
+        ser.rts = False
+    except Exception:
+        pass
+    return ser
+
 def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
     """CRC-8 MSB-first, poly 0x31, init 0xFF (matches Arduino crc8)."""
     crc = init
@@ -88,7 +104,7 @@ def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
 
 def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
     try:
-        with serial.Serial(port, BAUD, timeout=0.1) as probe:
+        with open_serial_no_reset(port, BAUD, timeout=0.1) as probe:
             time.sleep(PROBE_INITIAL_DELAY_S)
             for attempt in range(PROBE_RETRIES):
                 probe.reset_input_buffer()
@@ -122,6 +138,9 @@ def find_nano_port() -> str:
                 candidates.append(path)
     if NANO_PORT not in candidates and os.path.exists(NANO_PORT):
         candidates.append(NANO_PORT)
+
+    if os.path.exists(NANO_PORT):
+        return NANO_PORT
 
     for candidate in candidates:
         if probe_nano_port(candidate):
@@ -181,8 +200,8 @@ def main():
 
     # Open serial ports
     nano_port = find_nano_port()
-    nano  = serial.Serial(nano_port,  BAUD, timeout=0.01)
-    pilot = serial.Serial(PILOT_PORT, BAUD, timeout=0.01)
+    nano  = open_serial_no_reset(nano_port, BAUD, timeout=0.01)
+    pilot = open_serial_no_reset(PILOT_PORT, BAUD, timeout=0.01)
 
     # Buffers for framed transport
     nano_buf = bytearray()

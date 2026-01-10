@@ -88,6 +88,9 @@ def scan_devices():
                 by = by_path
         
         for device_path in paths:
+            if device_path.endswith('.real'):
+                # Skip glue-layer "real" symlinks to avoid probing the Arduino directly.
+                continue
             full_path = os.path.join(by, device_path)
             realpath = os.path.realpath(full_path)
             devices[full_path] = {'realpath': realpath}
