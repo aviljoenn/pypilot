@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#include <avr/pgmspace.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -117,8 +118,16 @@ int8_t manual_dir     = 0;      // -1 = port, +1 = starboard, 0 = none
 
 // Current calibration points: ADC reading vs measured amps
 const uint8_t  CURR_N = 8;
-const uint16_t CURR_ADC[CURR_N] = {430, 427, 426, 424, 423, 422, 420, 417};
-const float    CURR_A[CURR_N]   = {0.0f, 0.11f, 0.65f, 1.70f, 2.23f, 2.33f, 4.00f, 5.30f};
+const uint16_t CURR_ADC[CURR_N] PROGMEM = {430, 427, 426, 424, 423, 422, 420, 417};
+const float    CURR_A[CURR_N]   PROGMEM = {0.0f, 0.11f, 0.65f, 1.70f, 2.23f, 2.33f, 4.00f, 5.30f};
+
+static inline uint16_t curr_adc_at(uint8_t idx) {
+  return pgm_read_word(&CURR_ADC[idx]);
+}
+
+static inline float curr_a_at(uint8_t idx) {
+  return pgm_read_float(&CURR_A[idx]);
+}
 
 // ---- DS18B20 scheduling ----
 const unsigned long TEMP_PERIOD_MS = 1000;
@@ -383,24 +392,24 @@ float read_current_a() {
   current_debug_v   = adc_to_volts(adc);
 
   // Above "zero" point → treat as 0 A
-  if (adc >= CURR_ADC[0]) {
-    return CURR_A[0];
+  if (adc >= curr_adc_at(0)) {
+    return curr_a_at(0);
   }
   // Below or equal to lowest calibration → clamp to max
-  if (adc <= CURR_ADC[CURR_N - 1]) {
-    return CURR_A[CURR_N - 1];
+  if (adc <= curr_adc_at(CURR_N - 1)) {
+    return curr_a_at(CURR_N - 1);
   }
 
   // Find the segment CURR_ADC[i] >= adc >= CURR_ADC[i+1]
   for (uint8_t i = 0; i < CURR_N - 1; i++) {
-    uint16_t a0 = CURR_ADC[i];
-    uint16_t a1 = CURR_ADC[i + 1];
+    uint16_t a0 = curr_adc_at(i);
+    uint16_t a1 = curr_adc_at(i + 1);
 
     if (adc <= a0 && adc >= a1) {
       float x0 = (float)a0;
       float x1 = (float)a1;
-      float y0 = CURR_A[i];
-      float y1 = CURR_A[i + 1];
+      float y0 = curr_a_at(i);
+      float y1 = curr_a_at(i + 1);
 
       // Since ADC decreases with current, invert the fraction:
       float t = (x0 - (float)adc) / (x0 - x1);   // 0 at x0, 1 at x1
