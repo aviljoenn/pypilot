@@ -1,0 +1,51 @@
+# --- ESP-IDF / CMake / Ninja ---
+**/build/
+**/build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/compile_commands.json
+**/CTestTestfile.cmake
+**/*.ninja
+**/.ninja_deps
+**/.ninja_log
+**/install_manifest.txt
+
+# --- ESP-IDF generated/temporary ---
+**/sdkconfig.old
+**/sdkconfig.old.*
+**/sdkconfig.defaults.old
+**/dependencies.lock
+**/managed_components/
+
+# --- ESP-IDF tools / artifacts ---
+**/flasher_args.json
+**/flash_args
+**/partition_table/partition-table.bin
+**/*.bin
+**/*.elf
+**/*.map
+**/*.hex
+
+# --- Logs / temp files ---
+**/*.log
+**/log/
+**/logs/
+**/core*
+**/*.dmp
+
+# --- IDE / editor / OS ---
+**/.vscode/
+**/.idea/
+**/*.swp
+**/*.swo
+**/*~
+.DS_Store
+Thumbs.db
+
+# --- Python cache (some IDF tools use Python) ---
+**/__pycache__/
+**/*.pyc
+
+# --- Optional: ignore local environment files ---
+**/.env
