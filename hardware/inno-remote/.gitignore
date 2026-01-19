@@ -49,3 +49,6 @@ Thumbs.db
 
 # --- Optional: ignore local environment files ---
 **/.env
+
+**/wifi_secrets.h
+
