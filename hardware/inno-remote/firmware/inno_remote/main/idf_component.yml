@@ -1,0 +1,3 @@
+dependencies:
+  u8g2:
+    git: https://github.com/Zagitta/u8g2-esp-idf.git
