@@ -149,6 +149,19 @@ Assumes:
 - Board on a COM port (example uses COM9)
 - Project target is ESP32‑C3
 
+Secrets (not committed):
+```bash
+cp wifi_secrets.example.h wifi_secrets.h
+# Fill in Wi‑Fi credentials in wifi_secrets.h (do not commit).
+```
+
+Build:
+```bash
+idf.py set-target esp32c3  # Only needed the first time.
+idf.py build
+idf.py -p COMx flash
+```
+
 Typical flow:
 ```bash
 idf.py set-target esp32c3
