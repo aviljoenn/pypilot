@@ -16,6 +16,7 @@
 #include "u8g2_esp32_hal.h"
 
 #include "wifi_status.h"
+#include <stdarg.h>
 
 static const char *TAG = "INNO_REMOTE";
 
@@ -406,15 +407,181 @@ static void draw_wifi_icon_top_right(void)
     #undef DRAW_ARC_UPPER
 }
 
+static bool demo_mode_boot_check(void)
+{
+    // Hold STOP for this long during boot to enter demo mode
+    const int hold_ms = 800;
+    const int step_ms = 20;
+    const int steps = hold_ms / step_ms;
+
+    for (int i = 0; i < steps; i++) {
+        // STOP is active-low
+        if (gpio_get_level(PIN_ESTOP) != 0) {
+            return false; // released -> not demo
+        }
+        vTaskDelay(pdMS_TO_TICKS(step_ms));
+    }
+    return true; // held for the full duration
+}
+
+// =========================
+// Log ring buffer (100 lines)
+// =========================
+#define LOG_CAPACITY   100
+#define LOG_LINE_MAX   160  // truncate long lines
+
+static char s_log_lines[LOG_CAPACITY][LOG_LINE_MAX];
+static uint16_t s_log_head = 0;   // next write position
+static uint16_t s_log_count = 0;  // number of valid lines (<= LOG_CAPACITY)
+static uint32_t s_log_gen = 0;    // increments on every stored line
+
+static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
+static int (*s_orig_vprintf)(const char *fmt, va_list ap) = NULL;
+
+static void log_store_line_locked(const char *line)
+{
+    // strip trailing CR/LF
+    char tmp[LOG_LINE_MAX];
+    size_t n = strnlen(line, LOG_LINE_MAX - 1);
+    while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) n--;
+
+    // copy + null terminate
+    memcpy(tmp, line, n);
+    tmp[n] = '\0';
+
+    // store
+    strncpy(s_log_lines[s_log_head], tmp, LOG_LINE_MAX - 1);
+    s_log_lines[s_log_head][LOG_LINE_MAX - 1] = '\0';
+
+    s_log_head = (s_log_head + 1) % LOG_CAPACITY;
+    if (s_log_count < LOG_CAPACITY) s_log_count++;
+    s_log_gen++;
+}
+
+static void log_store_line(const char *line)
+{
+    portENTER_CRITICAL(&s_log_mux);
+    log_store_line_locked(line);
+    portEXIT_CRITICAL(&s_log_mux);
+}
+
+static int log_vprintf(const char *fmt, va_list ap)
+{
+    // format into a buffer for storing
+    char buf[LOG_LINE_MAX * 2];
+    va_list ap_copy;
+    va_copy(ap_copy, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap_copy);
+    va_end(ap_copy);
+
+    // split on newlines and store each line (skip empty)
+    char *p = buf;
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (*p) log_store_line(p);
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    // still print to console
+    if (s_orig_vprintf) return s_orig_vprintf(fmt, ap);
+    return vprintf(fmt, ap);
+}
+
+static void log_capture_init(void)
+{
+    s_orig_vprintf = esp_log_set_vprintf(log_vprintf);
+}
+
+static uint16_t log_count(void)
+{
+    uint16_t c;
+    portENTER_CRITICAL(&s_log_mux);
+    c = s_log_count;
+    portEXIT_CRITICAL(&s_log_mux);
+    return c;
+}
+
+static uint32_t log_gen(void)
+{
+    uint32_t g;
+    portENTER_CRITICAL(&s_log_mux);
+    g = s_log_gen;
+    portEXIT_CRITICAL(&s_log_mux);
+    return g;
+}
+
+static void log_copy_line(uint16_t idx_from_oldest, char *out, size_t out_sz)
+{
+    if (out_sz == 0) return;
+    out[0] = '\0';
+
+    portENTER_CRITICAL(&s_log_mux);
+
+    uint16_t c = s_log_count;
+    if (idx_from_oldest >= c) {
+        portEXIT_CRITICAL(&s_log_mux);
+        return;
+    }
+
+    uint16_t start = (s_log_head + LOG_CAPACITY - c) % LOG_CAPACITY;
+    uint16_t pos = (start + idx_from_oldest) % LOG_CAPACITY;
+
+    strncpy(out, s_log_lines[pos], out_sz - 1);
+    out[out_sz - 1] = '\0';
+
+    portEXIT_CRITICAL(&s_log_mux);
+}
+
+static int log_max_len(void)
+{
+    int maxlen = 0;
+    portENTER_CRITICAL(&s_log_mux);
+
+    uint16_t c = s_log_count;
+    uint16_t start = (s_log_head + LOG_CAPACITY - c) % LOG_CAPACITY;
+    for (uint16_t i = 0; i < c; i++) {
+        uint16_t pos = (start + i) % LOG_CAPACITY;
+        int len = (int)strnlen(s_log_lines[pos], LOG_LINE_MAX - 1);
+        if (len > maxlen) maxlen = len;
+    }
+
+    portEXIT_CRITICAL(&s_log_mux);
+    return maxlen;
+}
+
 // ------------------------------ Main ---------------------------------------
 
 void app_main(void)
 {
     init_gpio_inputs();
+    log_capture_init();
+    bool demo_mode = demo_mode_boot_check();
+    ESP_LOGI(TAG, "Boot mode: %s", demo_mode ? "DEMO" : "NORMAL");
     init_adc();
     init_oled_u8g2();
 
     wifi_sta_start();
+
+    // ===== Log View state =====
+    bool log_view = false;
+    bool log_ignore_stop_until_release = false;
+    bool log_pinned_bottom = true;
+    int  log_top = 0;            // index of first visible line (0=oldest)
+    int  log_horiz = 0;          // character offset
+    int  log_cached_maxlen = 0;
+    uint32_t log_last_gen = 0;
+
+    bool prev_stop_on = false;
+    int  stop_tap_count = 0;
+    uint32_t stop_window_start_ms = 0;
+    uint32_t last_stop_press_ms = 0;
+
+    const uint32_t STOP_TAP_WINDOW_MS = 4000;   // 5 taps within 4s total
+    const uint32_t STOP_TAP_GAP_MS = 900;     // max gap between taps
+    const uint32_t STOP_TAP_MIN_GAP_MS = 150;   // ignore bounce/double-edges
+    const int STOP_TAP_COUNT = 5;
 
     // AUTO state
     bool  ap_on = false;
@@ -546,7 +713,180 @@ void app_main(void)
                     if (manual_rudder_deg < -MAX_RUDDER_DEG) manual_rudder_deg = -MAX_RUDDER_DEG;
                 }
             }
+        }
 
+        // ===== STOP press edge detect =====
+        uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        bool stop_edge_press = (stop_on && !prev_stop_on);
+        bool stop_edge_release = (!stop_on && prev_stop_on);
+        prev_stop_on = stop_on;
+        if (log_ignore_stop_until_release && stop_edge_release) {
+            log_ignore_stop_until_release = false;
+        }
+
+        // ===== Enter Log View: STOP tapped 5x within 4s window =====
+        if (!log_view && !log_ignore_stop_until_release && stop_edge_press) {
+
+            // ignore bounce / too-fast repeats
+            if (last_stop_press_ms != 0 && (now_ms - last_stop_press_ms) < STOP_TAP_MIN_GAP_MS) {
+                // ignore
+            } else {
+                last_stop_press_ms = now_ms;
+
+                // start or restart the 4s window
+                if (stop_tap_count == 0 || (now_ms - stop_window_start_ms) > STOP_TAP_WINDOW_MS) {
+                    stop_window_start_ms = now_ms;
+                    stop_tap_count = 0;
+                }
+
+                stop_tap_count++;
+
+                // Debug so you can see it working in monitor
+                ESP_LOGI(TAG, "STOP taps: %d/%d", stop_tap_count, STOP_TAP_COUNT);
+
+                if (stop_tap_count >= STOP_TAP_COUNT && (now_ms - stop_window_start_ms) <= STOP_TAP_WINDOW_MS) {
+
+                    ESP_LOGI(TAG, "Entering LOG VIEW");
+
+                    log_view = true;
+                    log_ignore_stop_until_release = true;  // prevent instant exit on the 5th press
+                    log_pinned_bottom = true;
+                    log_last_gen = log_gen();
+                    log_cached_maxlen = log_max_len();
+
+                    // start at bottom (newest visible, newest at bottom line)
+                    int lines_per_screen = 10; // 4x6 font on 64px tall
+                    int total = (int)log_count();
+                    int bottom_top = total - lines_per_screen;
+                    if (bottom_top < 0) bottom_top = 0;
+                    log_top = bottom_top;
+
+                    stop_tap_count = 0;
+                    stop_window_start_ms = 0;
+                }
+            }
+        }
+
+        // ===== Log View Mode =====
+        if (log_view) {
+
+            // arm STOP-to-exit only after user releases STOP
+            if (log_ignore_stop_until_release && stop_edge_release) {
+                log_ignore_stop_until_release = false;
+            }
+
+            if (!log_ignore_stop_until_release && stop_edge_press) {
+                log_view = false;
+
+                // Reset tap state so this exit press can't immediately retrigger entry
+                stop_tap_count = 0;
+                stop_window_start_ms = 0;
+                last_stop_press_ms = 0;
+                log_ignore_stop_until_release = true;
+
+                // Require a clean STOP release before we allow tap-to-enter again
+                log_ignore_stop_until_release = true;
+
+                // Also reset horizontal scroll
+                log_horiz = 0;
+                continue;
+            }
+
+            // Update cached lengths when logs change; auto-follow bottom if pinned
+            uint32_t g = log_gen();
+            if (g != log_last_gen) {
+                log_last_gen = g;
+                log_cached_maxlen = log_max_len();
+
+                int lines_per_screen = 10;
+                int total = (int)log_count();
+                int bottom_top = total - lines_per_screen;
+                if (bottom_top < 0) bottom_top = 0;
+
+                if (log_pinned_bottom) {
+                    log_top = bottom_top;
+                } else {
+                    // clamp if buffer rolled
+                    if (log_top > bottom_top) log_top = bottom_top;
+                }
+            }
+
+            // POT horizontal scroll (0..max_offset chars)
+            int cols = 32; // ~128px / 4px per char with 4x6 font
+            int max_off = log_cached_maxlen - cols;
+            if (max_off < 0) max_off = 0;
+
+            int potv = raw_pot;
+            if (potv < 0) potv = 0;
+            if (potv > 4095) potv = 4095;
+            log_horiz = (max_off == 0) ? 0 : (int)((potv * (long)max_off + 2047) / 4095);
+
+            // Button controls (ladder buttons)
+            // BTN_1: page up, BTN_2: line up, BTN_3: bottom, BTN_4: line down, BTN_5: page down
+            if (pressed_event) {
+                int lines_per_screen = 10;
+                int total = (int)log_count();
+                int bottom_top = total - lines_per_screen;
+                if (bottom_top < 0) bottom_top = 0;
+
+                if (stable_btn == BTN_1) {
+                    log_top -= lines_per_screen;
+                } else if (stable_btn == BTN_2) {
+                    log_top -= 1;
+                } else if (stable_btn == BTN_3) {
+                    log_top = bottom_top;
+                    log_pinned_bottom = true;
+                } else if (stable_btn == BTN_4) {
+                    log_top += 1;
+                } else if (stable_btn == BTN_5) {
+                    log_top += lines_per_screen;
+                }
+
+                if (log_top < 0) log_top = 0;
+                if (log_top > bottom_top) log_top = bottom_top;
+
+                // pinned if at bottom
+                log_pinned_bottom = (log_top == bottom_top);
+            }
+
+            // ===== Render Log View =====
+            u8g2_ClearBuffer(&u8g2);
+            u8g2_SetFont(&u8g2, u8g2_font_4x6_tf);
+
+            int ascent = u8g2_GetAscent(&u8g2);
+            int descent = u8g2_GetDescent(&u8g2);   // negative
+            int line_h = ascent - descent;
+            if (line_h <= 0) line_h = 6;
+
+            int lines_per_screen = SCREEN_H / line_h;
+            if (lines_per_screen < 1) lines_per_screen = 1;
+
+            char linebuf[LOG_LINE_MAX];
+
+            for (int i = 0; i < lines_per_screen; i++) {
+                int idx = log_top + i;
+                if (idx >= (int)log_count()) break;
+
+                log_copy_line((uint16_t)idx, linebuf, sizeof(linebuf));
+
+                // Apply horizontal scroll in characters
+                int len = (int)strlen(linebuf);
+                const char *p = linebuf;
+                if (log_horiz < len) p = linebuf + log_horiz;
+                else p = "";
+
+                int y = i * line_h + ascent;
+                u8g2_DrawStr(&u8g2, 0, y, p);
+            }
+
+            u8g2_SendBuffer(&u8g2);
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue; // skip normal UI while in log view
+        }
+
+
+
+        if (!stop_on) {
             // Determine rudder target
             if (in_auto) {
                 if (ap_on) {
@@ -625,7 +965,7 @@ void app_main(void)
         u8g2_ClearBuffer(&u8g2);
 
         // Line 1
-        draw_title_centered("Inno-Remote", Y_TITLE_BASE);
+        draw_title_centered(demo_mode ? "DEMO-Mode" : "Inno-Remote", Y_TITLE_BASE);
 
         // Line 2 (rudder graph)
         float rudder_norm_ui = rudder_deg / MAX_RUDDER_DEG;
