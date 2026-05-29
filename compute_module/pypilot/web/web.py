@@ -56,14 +56,7 @@ print('using port', pypilot_web_port)
 # Set this variable to 'threading', 'eventlet' or 'gevent' to test the
 # different async modes, or leave it set to None for the application to choose
 # the best option based on installed packages.
-#
-# Inno-Pilot pins 'threading' deliberately.  With async_mode=None, flask_socketio
-# auto-selects gevent (eventlet isn't installed on the Pi), and importing
-# engineio's gevent async driver takes ~15 s on Raspberry Pi OS Bookworm /
-# Python 3.13 — during which the calibration UI on port 8000 is unreachable.
-# The 'threading' driver uses simple_websocket (already installed) and binds the
-# port in ~1 s.  See CLAUDE.md for the related Flask 2.3 Markup fix in this file.
-async_mode = 'threading'
+async_mode = None
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'

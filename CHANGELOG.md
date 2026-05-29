@@ -8,12 +8,11 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ### Fixed
 - **pypilot web UI / install** (`install.sh`, `inno_deploy.sh`,
-  `compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot_web.service`,
-  `compute_module/pypilot/web/web.py`): the pypilot web UI on port **8000** —
-  which hosts the compass/heel **calibration** interface — was never installed.
-  `install.sh` deliberately skipped `pypilot_web.service` ("not used by
-  Inno-Pilot"), and `inno_deploy.sh` only *started* the unit if it already
-  existed, so port 8000 was down on every Pi.
+  `compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot_web.service`):
+  the pypilot web UI on port **8000** — which hosts the compass/heel
+  **calibration** interface — was never installed. `install.sh` deliberately
+  skipped `pypilot_web.service` ("not used by Inno-Pilot"), and `inno_deploy.sh`
+  only *started* the unit if it already existed, so port 8000 was down on every Pi.
   - `install.sh` now installs and enables `pypilot_web.service` alongside
     `pypilot.service`.
   - `inno_deploy.sh` Step 4b now installs/enables the unit on redeploy, so Pis
@@ -21,19 +20,15 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   - `inno_deploy.sh` Step 4b now does a **two-pass** `setup.py install`.
     dependencies.py drops a `pyproject.toml` that (on setuptools 78 / Python
     3.13) makes `build_py` skip the pure-Python pypilot source, so a single pass
-    installs only the C extensions and never updates `web.py` et al. The first
-    redeploy proved this: the unit came up but still ran `async_mode=None` and
-    took ~35 s to bind 8000. The second pass (pyproject.toml removed + `deps`
-    marker touched, bypassing dependencies.py) actually installs the Python
-    modules so the `threading` change — and any future pypilot source edit —
-    reaches the Pi. This mirrors install.sh's workaround but runs every redeploy
-    (install.sh only ran it when pypilot was entirely missing).
-  - The unit now runs as `User=innopilot` (was unset → ran as root, wrong
-    `~/.pypilot`) and uses an absolute `ExecStart` path.
-  - `web.py` pins `async_mode='threading'`: with the previous auto-select,
-    flask_socketio chose gevent (eventlet not installed) and took ~15 s to bind
-    port 8000 on Pi OS Bookworm / Python 3.13. Threading uses the already-present
-    `simple_websocket` and binds in ~1 s.
+    installs only the C extensions and never updates `web.py` et al. — meaning
+    edits to pypilot Python source silently never reach the Pi on a redeploy.
+    The second pass (pyproject.toml removed + `deps` marker touched, bypassing
+    dependencies.py) actually installs the Python modules. This mirrors
+    install.sh's workaround but runs every redeploy (install.sh only ran it when
+    pypilot was entirely missing).
+  - The unit runs as `User=innopilot` (upstream ships it with no `User=` line, so
+    it would run as root with the wrong `~/.pypilot`) and uses an absolute
+    `ExecStart` path.
 
 ### Notes
 - This change touches the **pypilot** subsystem and the installers only; it does

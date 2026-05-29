@@ -222,6 +222,35 @@ fork), you will need to patch `web/web.py` manually.
 
 ---
 
+## Known gotcha: editing pypilot Python source needs a TWO-PASS `setup.py install`
+
+**A single `setup.py install` does NOT deploy edits to pypilot's pure-Python
+source** (e.g. `web/web.py`, `autopilot.py`, anything under `compute_module/pypilot/`).
+Only the C extensions and `pypilot_data` get copied; the Python modules are silently
+skipped, so the running service keeps using the **old installed copy**.
+
+**Why:** `dependencies.py` (invoked inside `setup.py install`) clones `pypilot_data`,
+which drops a `pyproject.toml` into `compute_module/pypilot/`.  On setuptools 78 /
+Python 3.13 (Bookworm/Trixie) that `pyproject.toml` is treated as authoritative and
+overrides `setup(packages=…)`, so `build_py` skips the pypilot package source.
+
+**Symptom:** you edit `web/web.py` (or any pypilot module), deploy, the service
+restarts fine and reports `active` — but the change isn't there (diff the installed
+copy under `/usr/local/lib/python3.*/dist-packages/pypilot/` against the repo and it
+still shows the old value).  This was discovered while iterating on `web/web.py`:
+a single-pass redeploy kept silently running the previously-installed copy.
+
+**Fix (already in place):** both `install.sh` (Phase 3) and `inno_deploy.sh`
+(Step 4b) do a **two-pass** install — pass 1 fetches deps + builds C extensions,
+then pass 2 bypasses `dependencies.py` (`rm -f pyproject.toml; touch deps`) so
+`build_py` uses `setup(packages=…)` and actually installs the Python modules.
+Verify pass 2 ran by looking for `copying web/web.py -> build/...` in the log.
+
+**If you add another deploy/install path that touches pypilot**, replicate the
+two-pass pattern or your pure-Python edits will not land.
+
+---
+
 ## When uncertain
 - Prefer asking a clarifying question in the PR description or as a comment rather than guessing.
 - If you must assume: **state assumptions explicitly** and keep the change minimal.
