@@ -351,10 +351,30 @@ info "Step 4b — Install pypilot Python package (web templates, JS, core)"
 # Python package and are only picked up by the running service after a fresh
 # `setup.py install`. A plain `git pull` updates the repo but not the installed
 # package — this step closes that gap.
+#
+# Two-pass install (see the same workaround in install.sh Phase 3):
+# dependencies.py — run inside `setup.py install` — drops a pyproject.toml into
+# this dir, and on setuptools 78 / Python 3.13 that pyproject.toml overrides
+# setup(packages=…), so build_py skips the *pure-Python* pypilot source entirely
+# (only the C extensions and pypilot_data land in dist-packages).  install.sh
+# only re-runs the workaround when pypilot is *missing*; on a redeploy the import
+# always succeeds, so without this second pass any edit to pypilot Python source
+# (e.g. web/web.py — async_mode, the Flask Markup fix) never reaches the Pi and
+# the running service keeps using the stale installed copy.
+#
+# Pass 1 fetches deps and builds the C extensions.  Pass 2 bypasses
+# dependencies.py — by removing the pyproject.toml it dropped and touching the
+# `deps` success-marker it checks for — so build_py uses setup(packages=…) and
+# actually installs/updates the pypilot Python modules and entry-point scripts.
 PYPILOT_DIR="$REPO_DIR/compute_module/pypilot"
-log "Running setup.py install in $PYPILOT_DIR ..."
 cd "$PYPILOT_DIR"
+log "Running setup.py install in $PYPILOT_DIR (pass 1 — deps + C extensions) ..."
 sudo python3 setup.py install --quiet
+log "Re-running setup.py install (pass 2 — pypilot Python source, deps bypassed) ..."
+rm -f pyproject.toml
+touch deps
+sudo python3 setup.py install --quiet
+rm -f deps
 log "pypilot package installed."
 
 # Ensure the pypilot_web.service unit (calibration web UI on port 8000) is
