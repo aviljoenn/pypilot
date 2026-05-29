@@ -357,6 +357,22 @@ cd "$PYPILOT_DIR"
 sudo python3 setup.py install --quiet
 log "pypilot package installed."
 
+# Ensure the pypilot_web.service unit (calibration web UI on port 8000) is
+# installed and enabled.  install.sh sets this up on a fresh build, but Pis
+# provisioned before pypilot_web was made mandatory won't have the unit — so a
+# redeploy must create it too, otherwise Step 7 silently skips starting it.
+# The repo unit already pins User=innopilot, so no in-place patching is needed.
+PYPILOT_WEB_UNIT_SRC="$PYPILOT_DIR/scripts/debian/etc/systemd/system/pypilot_web.service"
+PYPILOT_WEB_UNIT_DST="/etc/systemd/system/pypilot_web.service"
+if [ -f "$PYPILOT_WEB_UNIT_SRC" ]; then
+    log "Installing/enabling pypilot_web.service (calibration web UI on port 8000) ..."
+    sudo install -m 644 "$PYPILOT_WEB_UNIT_SRC" "$PYPILOT_WEB_UNIT_DST"
+    sudo systemctl daemon-reload
+    sudo systemctl enable pypilot_web.service
+else
+    log "WARNING: pypilot_web.service template not found at $PYPILOT_WEB_UNIT_SRC — calibration web UI will not be installed"
+fi
+
 # ---------------------------------------------------------------------------
 info "Step 5 — Flash Nano firmware"
 # ---------------------------------------------------------------------------
@@ -466,9 +482,13 @@ sleep "$BRIDGE_SETTLE_S"
 # autopilot connects via the PTY symlink created by socat + fixlink
 start_svc pypilot
 
-# pypilot_web is optional (Pi5 second boat may have it; Pi Zero typically doesn't)
+# pypilot_web (port 8000) hosts the calibration UI and is now installed on every
+# Inno-Pilot by Step 4b above, so it should always be present.  The guard remains
+# as a safety net in case the unit failed to install.
 if systemctl list-unit-files pypilot_web.service &>/dev/null; then
     start_svc pypilot_web
+else
+    log "WARNING: pypilot_web.service missing — calibration UI (port 8000) will not start"
 fi
 
 # ---------------------------------------------------------------------------

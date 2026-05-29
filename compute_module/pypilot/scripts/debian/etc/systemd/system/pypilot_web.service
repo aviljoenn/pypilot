@@ -5,7 +5,11 @@ After=pypilot.service
 
 [Service]
 Type=simple
-ExecStart=pypilot_web 8000
+# Absolute path (matches pypilot.service); systemd has no guaranteed PATH.
+# Runs as innopilot so pypilot_web reads /home/innopilot/.pypilot (calibration
+# config) rather than root's home.  Upstream ships this unit with no User= line.
+User=innopilot
+ExecStart=/usr/local/bin/pypilot_web 8000
 StandardOutput=journal
 StandardError=journal
 Restart=always

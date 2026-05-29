@@ -254,12 +254,16 @@ fi
 # "Unit pypilot.service could not be found" after install and the autopilot
 # never starts on boot.
 #
-# We only install pypilot.service itself (the autopilot core).  pypilot_web,
-# pypilot_hat, and pypilot_boatimu are not used by Inno-Pilot and would only
-# add maintenance burden if installed.
+# We install pypilot.service (the autopilot core) and pypilot_web.service (the
+# web UI on port 8000 — it hosts the compass/heel calibration interface, which
+# Inno-Pilot relies on, so it must always be present).  pypilot_hat and
+# pypilot_boatimu are not used by Inno-Pilot and would only add maintenance
+# burden if installed.
 #
-# The shipped unit hard-codes User=pi, which doesn't exist on Inno-Pilot Pis
-# (we use innopilot).  Patch the User line in place during install.
+# The shipped pypilot.service hard-codes User=pi, which doesn't exist on
+# Inno-Pilot Pis (we use innopilot).  Patch the User line in place during
+# install.  (The pypilot_web.service unit in the repo already specifies
+# User=innopilot, so it needs no patching.)
 PYPILOT_UNIT_SRC="$REPO_DIR/compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot.service"
 PYPILOT_UNIT_DST="/etc/systemd/system/pypilot.service"
 if [ -f "$PYPILOT_UNIT_SRC" ]; then
@@ -270,6 +274,22 @@ if [ -f "$PYPILOT_UNIT_SRC" ]; then
     sudo systemctl enable pypilot.service
 else
     info "WARNING: pypilot.service template not found at $PYPILOT_UNIT_SRC — autopilot will not auto-start"
+fi
+
+# pypilot_web.service — the web UI on port 8000 that serves the calibration
+# interface.  Installed and enabled the same way as pypilot.service above.  The
+# repo unit already pins User=innopilot and async_mode=threading (see web.py),
+# so no in-place patching is needed.  daemon-reload runs again so systemd picks
+# up the newly-copied unit before enable.
+PYPILOT_WEB_UNIT_SRC="$REPO_DIR/compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot_web.service"
+PYPILOT_WEB_UNIT_DST="/etc/systemd/system/pypilot_web.service"
+if [ -f "$PYPILOT_WEB_UNIT_SRC" ]; then
+    info "Installing pypilot_web.service unit (calibration web UI on port 8000)"
+    sudo install -m 644 "$PYPILOT_WEB_UNIT_SRC" "$PYPILOT_WEB_UNIT_DST"
+    sudo systemctl daemon-reload
+    sudo systemctl enable pypilot_web.service
+else
+    info "WARNING: pypilot_web.service template not found at $PYPILOT_WEB_UNIT_SRC — calibration web UI will not auto-start"
 fi
 
 # ── Phase 4 — arduino-cli ────────────────────────────────────────────────────

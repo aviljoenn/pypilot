@@ -6,6 +6,30 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+### Fixed
+- **pypilot web UI / install** (`install.sh`, `inno_deploy.sh`,
+  `compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot_web.service`,
+  `compute_module/pypilot/web/web.py`): the pypilot web UI on port **8000** —
+  which hosts the compass/heel **calibration** interface — was never installed.
+  `install.sh` deliberately skipped `pypilot_web.service` ("not used by
+  Inno-Pilot"), and `inno_deploy.sh` only *started* the unit if it already
+  existed, so port 8000 was down on every Pi.
+  - `install.sh` now installs and enables `pypilot_web.service` alongside
+    `pypilot.service`.
+  - `inno_deploy.sh` Step 4b now installs/enables the unit on redeploy, so Pis
+    provisioned before this change pick it up without a full reinstall.
+  - The unit now runs as `User=innopilot` (was unset → ran as root, wrong
+    `~/.pypilot`) and uses an absolute `ExecStart` path.
+  - `web.py` pins `async_mode='threading'`: with the previous auto-select,
+    flask_socketio chose gevent (eventlet not installed) and took ~15 s to bind
+    port 8000 on Pi OS Bookworm / Python 3.13. Threading uses the already-present
+    `simple_websocket` and binds in ~1 s.
+
+### Notes
+- This change touches the **pypilot** subsystem and the installers only; it does
+  **not** modify any of the version-synced inno-remote components (Bridge, Nano,
+  Remote), so no `INNOPILOT_VERSION` bump is required.
+
 ## [v1.3.3_B3] — 2026-05-08 — Fix: deploy script aborts on root-owned nano_sketch.sha256
 
 ### Fixed
