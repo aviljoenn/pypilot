@@ -371,10 +371,15 @@ cd "$PYPILOT_DIR"
 log "Running setup.py install in $PYPILOT_DIR (pass 1 — deps + C extensions) ..."
 sudo python3 setup.py install --quiet
 log "Re-running setup.py install (pass 2 — pypilot Python source, deps bypassed) ..."
-rm -f pyproject.toml
-touch deps
+# Use sudo for the marker-file shuffle: pass 1 ran under sudo, so dependencies.py
+# created `deps` (and pyproject.toml) as root.  A plain `touch deps` as the
+# invoking user then fails with "Permission denied" on the root-owned file,
+# aborting the deploy mid-way (services already stopped in Step 3).  Same
+# root-owned-file hazard the NANO_HASH_FILE guard in Step 5 handles.
+sudo rm -f pyproject.toml
+sudo touch deps
 sudo python3 setup.py install --quiet
-rm -f deps
+sudo rm -f deps
 log "pypilot package installed."
 
 # Ensure the pypilot_web.service unit (calibration web UI on port 8000) is
