@@ -35,6 +35,52 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   **not** modify any of the version-synced inno-remote components (Bridge, Nano,
   Remote), so no `INNOPILOT_VERSION` bump is required.
 
+## [v1.3.3_B7] — 2026-06-26 — ADC mux-settle fix (spurious PiV HIGH) + 5V calibration
+
+### Fixed
+- **Nano firmware** (`motor_simple.ino`, `read_adc_avg()`): added ADC sample/hold
+  settling (3 discarded reads after each channel switch). Without it the
+  high-impedance dividers (A3 Pi/5V, A0 Vin) suffered ADC-mux **crosstalk**: A3 (5V
+  rail) intermittently read ~14 V (≈ Vin's pin voltage), tripping a **spurious
+  `PiV HIGH` alarm** (buzzer + OLED) once FEATURE_PI_VOLTAGE was enabled. Confirmed
+  via the new 5V telemetry — ~15 % of samples read 14.2 V, the rest a correct ~5.18 V
+  (14 V on a 5 V rail is impossible — it would destroy the Pi/Nano).
+- **Nano firmware**: `PI_VSENSE_SCALE` calibrated 5.25 → **5.17** (multimeter 5.1 V
+  vs reported 5.18 V). Per-board value.
+
+### Changed
+- **All version-synced components** (Nano, Bridge, Web remote): v1.3.3_B6 → v1.3.3_B7.
+
+### Hardware impact
+- Adds ~1.2 ms per `read_adc_avg()` call (3 settle reads); negligible at 5 Hz, no
+  change to motor drive. Makes A3/A0/A1 readings trustworthy — prerequisite for a
+  meaningful brown-out load test.
+
+## [v1.3.3_B6] — 2026-06-26 — 5V-rail telemetry + Vin calibration (brown-out diagnosis)
+
+### Added
+- **Nano firmware + Bridge**: 5V logic-rail telemetry. The Nano samples the shared
+  Pi/Nano 5V bus (A3) each telemetry cycle and sends it as `PI_VOLTAGE_CODE` (0xB4,
+  volts×100); the bridge logs it at DEBUG (`Nano 5V rail: X.XX V`). Lets us watch the
+  logic rail under motor load to diagnose a suspected brown-out/reset of the Nano
+  during steering. Forwarded to pypilot like other inno-pilot codes (pypilot ignores
+  codes it doesn't recognise, so no guard needed).
+
+### Fixed
+- **Nano firmware** (`motor_simple.ino`): `VOLTAGE_SCALE` corrected for Malu (.13)
+  from 3.323 to **4.855** (bench-calibrated: multimeter 12.985 V vs reported 8.887 V).
+  The old value under-read Vin by ~35% (a true 13 V showed as ~8.9 V — below the
+  10.9 V under-voltage threshold; harmless only because battery-voltage faults are
+  disabled on Malu). Per-board value; recalibrate per unit.
+
+### Changed
+- **All version-synced components** (Nano, Bridge, Web remote): v1.3.3_B5 → v1.3.3_B6.
+
+### Hardware impact
+- Adds one ADC read (A3) per telemetry cycle (~5 Hz); negligible loop-time impact, no
+  change to motor drive. Corrected `VOLTAGE_SCALE` makes the reported Vin accurate —
+  relevant if battery-voltage faults are later enabled.
+
 ## [v1.3.3_B5] — 2026-06-23 — Fix: remote-manual (REMOTE) rudder runaway — axis sign
 
 ### Fixed

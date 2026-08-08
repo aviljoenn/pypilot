@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B5";
-const uint16_t INNOPILOT_BUILD_NUM = 5;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B7";
+const uint16_t INNOPILOT_BUILD_NUM = 7;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -60,6 +60,11 @@ const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote n
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
+
+// Nano->Bridge: 5V logic-rail voltage (shared Pi/Nano 5V bus, sensed on A3) * 100,
+// uint16.  e.g. 5.20 V -> 520.  Bridge logs/monitors this (forwarded to pypilot too,
+// which ignores codes it doesn't recognise).  Added to diagnose motor-load brown-out.
+const uint8_t PI_VOLTAGE_CODE        = 0xB4;
 
 // Nano->Bridge: H-bridge pin state change (diagnostic, on-change only)
 // value bits: [2]=D9/EN(PWM)  [1]=D3/LPWM  [0]=D2/RPWM
@@ -186,7 +191,7 @@ const uint8_t DIRB_LIMIT_PIN   = 7;   // Dir-B end limit switch
 const uint8_t DIRA_LIMIT_PIN   = 8;   // Dir-A end limit switch
 
 const float ADC_VREF              = 5.00f;
-const float VOLTAGE_SCALE         = 3.323f; // Change to 3.323f for .12 and 5.156f for .13
+const float VOLTAGE_SCALE         = 4.855f; // Per-board: bench-calibrate. Malu(.13)=4.855 (multimeter 12.985V vs reported 8.887V @3.323, 2026-06-26 = 3.323*12.985/8.887). Examples: .12=3.323, .13~5.156 nominal.
 
 // New sensor calibration from ADC readings:
 // @ 0 A  : ADC = 430 -> V0 ≈ 2.103 V
@@ -204,7 +209,7 @@ const uint8_t ADC_SAMPLES         = 16;
 // Tune RUDDER_FIFO_SIZE to trade smoothness vs step-response lag.
 const uint8_t RUDDER_FIFO_SIZE    = 16;
 
-const float PI_VSENSE_SCALE = 5.25f;
+const float PI_VSENSE_SCALE = 5.17f; // Malu: bench-calibrated 2026-06-26 (multimeter 5.1V vs reported 5.18V @5.25). Per-board.
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
 const float MAX_CONTROLLER_TEMP_C = 50.0f;
@@ -606,6 +611,18 @@ void comms_err_bucket_tick(unsigned long now) {
 }
 
 uint16_t read_adc_avg(uint8_t pin, uint8_t samples) {
+  // ADC mux settle (Fix #B7): switching the ADC multiplexer leaves the previous
+  // channel's charge on the sample/hold cap.  For the high-impedance voltage
+  // dividers (A3 Pi/5V rail, A0 Vin) the first conversions after a channel switch
+  // can read the OLD channel's level — observed as A3 intermittently reporting
+  // ~14 V (= Vin's pin voltage), which falsely tripped the PiV HIGH alarm.  Discard
+  // a few throwaway reads so the S/H cap settles to THIS pin before we average.
+  // (Same idea as the dummy reads in service_rudder_adc().)
+  for (uint8_t s = 0; s < 3; s++) {
+    (void)analogRead(pin);
+    delayMicroseconds(300);
+  }
+
   uint32_t sum = 0;
   for (uint8_t i = 0; i < samples; i++) {
     sum += (uint16_t)analogRead(pin);
@@ -2375,6 +2392,19 @@ if (!ap_engaged && !remote_manual_active) {
       scaled = 65535;
     }
     send_frame(VOLTAGE_CODE, (uint16_t)scaled);
+
+    // 5V logic-rail telemetry (A3, shared Pi/Nano 5V bus): value * 100.
+    // Read fresh so it works regardless of FEATURE_PI_VOLTAGE; used to catch a
+    // motor-load brown-out of the shared supply that can reset the Nano.
+    float v5 = read_pi_voltage_v();
+    int scaled5 = (int)(v5 * 100.0f + 0.5f);
+    if (scaled5 < 0) {
+      scaled5 = 0;
+    } else if (scaled5 > 65535) {
+      scaled5 = 65535;
+    }
+    send_frame(PI_VOLTAGE_CODE, (uint16_t)scaled5);
+
     last_voltage_ms = now;
   }
 

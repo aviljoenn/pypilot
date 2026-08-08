@@ -118,8 +118,8 @@ def ota_host() -> str:
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.3.3_B5"
-INNOPILOT_BUILD_NUM = 5  # increment with each push during development
+INNOPILOT_VERSION   = "v1.3.3_B7"
+INNOPILOT_BUILD_NUM = 7  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -173,6 +173,9 @@ WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
 # Nano -> Bridge telemetry / events
 PIN_STATE_CODE    = 0xE1  # H-bridge pin state change: bits [2]=D9/EN, [1]=D3/LPWM, [0]=D2/RPWM
 BUTTON_EVENT_CODE = 0xE0
+PI_VOLTAGE_CODE   = 0xB4  # Nano -> Bridge: 5V logic-rail voltage *100 (shared Pi/Nano bus).
+                          # Diagnostic; logged at DEBUG. Forwarded to pypilot like the other
+                          # inno-pilot codes — pypilot ignores codes it doesn't recognise.
 
 # B26: motor activation reason diagnostic — sent once when D9 goes LOW→HIGH
 MOTOR_REASON_CODE = 0xEE
@@ -1894,6 +1897,12 @@ def main() -> None:
 
                     except Exception as e:
                         log.error("Button event error: %s", e)
+
+                elif code == PI_VOLTAGE_CODE:
+                    # 5V logic-rail telemetry (shared Pi/Nano bus, sensed on Nano A3).
+                    # value = volts * 100.  Logged at DEBUG (enable with SIGUSR1) to watch
+                    # the rail under motor load — a brown-out shows as a sag here.
+                    log.debug("Nano 5V rail: %.2f V", value / 100.0)
 
                 elif code == PIN_STATE_CODE:
                     # H-bridge pin state change from Nano (D2/D3/D9)
