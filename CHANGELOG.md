@@ -35,6 +35,91 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   **not** modify any of the version-synced inno-remote components (Bridge, Nano,
   Remote), so no `INNOPILOT_VERSION` bump is required.
 
+## [v1.3.3_B7] — 2026-06-26 — ADC mux-settle fix (spurious PiV HIGH) + 5V calibration
+
+### Fixed
+- **Nano firmware** (`motor_simple.ino`, `read_adc_avg()`): added ADC sample/hold
+  settling (3 discarded reads after each channel switch). Without it the
+  high-impedance dividers (A3 Pi/5V, A0 Vin) suffered ADC-mux **crosstalk**: A3 (5V
+  rail) intermittently read ~14 V (≈ Vin's pin voltage), tripping a **spurious
+  `PiV HIGH` alarm** (buzzer + OLED) once FEATURE_PI_VOLTAGE was enabled. Confirmed
+  via the new 5V telemetry — ~15 % of samples read 14.2 V, the rest a correct ~5.18 V
+  (14 V on a 5 V rail is impossible — it would destroy the Pi/Nano).
+- **Nano firmware**: `PI_VSENSE_SCALE` calibrated 5.25 → **5.17** (multimeter 5.1 V
+  vs reported 5.18 V). Per-board value.
+
+### Changed
+- **All version-synced components** (Nano, Bridge, Web remote): v1.3.3_B6 → v1.3.3_B7.
+
+### Hardware impact
+- Adds ~1.2 ms per `read_adc_avg()` call (3 settle reads); negligible at 5 Hz, no
+  change to motor drive. Makes A3/A0/A1 readings trustworthy — prerequisite for a
+  meaningful brown-out load test.
+
+## [v1.3.3_B6] — 2026-06-26 — 5V-rail telemetry + Vin calibration (brown-out diagnosis)
+
+### Added
+- **Nano firmware + Bridge**: 5V logic-rail telemetry. The Nano samples the shared
+  Pi/Nano 5V bus (A3) each telemetry cycle and sends it as `PI_VOLTAGE_CODE` (0xB4,
+  volts×100); the bridge logs it at DEBUG (`Nano 5V rail: X.XX V`). Lets us watch the
+  logic rail under motor load to diagnose a suspected brown-out/reset of the Nano
+  during steering. Forwarded to pypilot like other inno-pilot codes (pypilot ignores
+  codes it doesn't recognise, so no guard needed).
+
+### Fixed
+- **Nano firmware** (`motor_simple.ino`): `VOLTAGE_SCALE` corrected for Malu (.13)
+  from 3.323 to **4.855** (bench-calibrated: multimeter 12.985 V vs reported 8.887 V).
+  The old value under-read Vin by ~35% (a true 13 V showed as ~8.9 V — below the
+  10.9 V under-voltage threshold; harmless only because battery-voltage faults are
+  disabled on Malu). Per-board value; recalibrate per unit.
+
+### Changed
+- **All version-synced components** (Nano, Bridge, Web remote): v1.3.3_B5 → v1.3.3_B6.
+
+### Hardware impact
+- Adds one ADC read (A3) per telemetry cycle (~5 Hz); negligible loop-time impact, no
+  change to motor drive. Corrected `VOLTAGE_SCALE` makes the reported Vin accurate —
+  relevant if battery-voltage faults are later enabled.
+
+## [v1.3.3_B5] — 2026-06-23 — Fix: remote-manual (REMOTE) rudder runaway — axis sign
+
+### Fixed
+- **Nano firmware** (`servo_motor_control/arduino/motor_simple/motor_simple.ino`):
+  remote-manual ("REMOTE" helm) steering ran the rudder hard-over to the
+  commanded-side end-stop instead of servoing to the commanded angle. The B49
+  angle-based loop assumed `pilot_rudder_deg10` was `+port / -stbd`, but the bridge
+  transmits the Nano `-rudder.angle` (`PILOT_RUDDER_CODE`) plus matching limits, so
+  the axis is actually `+stbd / -port`. That single inverted assumption made the
+  position loop **positive-feedback** (error grew as it drove) and pointed the
+  end-limit guard at the wrong end, so nothing halted travel. Confirmed by
+  instrumented bench test on Malu (192.168.6.13): a small port command drove the
+  rudder to the port stop (~+91°, well past the ±42° calibrated limit).
+  - Rebuilt the remote-manual block on the correct `+stbd / -port` axis — target
+    mapping, position error, drive direction, and end-limit guard are now consistent,
+    so the loop converges and holds at the commanded angle.
+  - Added a **convention-independent absolute end backstop** (`over_stbd_end` /
+    `over_port_end`): the motor is never driven past a calibrated end regardless of
+    the directional logic — defence-in-depth against any future sign error.
+  - Motor direction mapping unchanged (bench-confirmed correct: port cmd → port
+    motion); only the position-loop sign and limit-end mapping were wrong.
+- **Deploy/install** (`inno_deploy.sh`, `install.sh`): the two-pass `setup.py install`
+  marker-file shuffle now uses `sudo` (`sudo rm -f pyproject.toml; sudo touch deps;
+  sudo rm -f deps`). Pass 1 runs under sudo and creates those files as root, so the
+  earlier plain `touch deps` failed with "Permission denied" and aborted the deploy
+  mid-way (after services were already stopped).
+
+### Changed
+- **All version-synced components** (Nano, Bridge, Web remote): v1.3.3_B4 →
+  v1.3.3_B5 (`INNOPILOT_VERSION` / `INNOPILOT_BUILD_NUM`). The ESP32 hardware-remote
+  OTA binary is not rebuilt here — it is not used for the bench validation (the web
+  remote on port 8888 drives the test).
+
+### Hardware impact
+- Changes which H-bridge direction is commanded for a given rudder error in
+  remote-manual mode, and adds an absolute end-stop cutout. Requires a Nano reflash
+  and bench re-test before sea use: verify port/stbd convergence and that travel
+  halts at the calibrated limits.
+
 ## [v1.3.3_B3] — 2026-05-08 — Fix: deploy script aborts on root-owned nano_sketch.sha256
 
 ### Fixed

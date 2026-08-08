@@ -228,10 +228,13 @@ sudo python3 setup.py install
 # to install the pypilot Python modules and entry-point scripts.
 if ! python3 -c "import pypilot.autopilot" 2>/dev/null; then
     info "pypilot Python modules missing — bypassing dependencies.py and retrying"
-    rm -f pyproject.toml
-    touch deps
+    # sudo for the marker-file shuffle: the pass above ran under sudo, so
+    # dependencies.py created `deps`/`pyproject.toml` as root.  A plain
+    # `touch deps` as the invoking user then fails on the root-owned file.
+    sudo rm -f pyproject.toml
+    sudo touch deps
     sudo python3 setup.py install
-    rm -f deps
+    sudo rm -f deps
 fi
 
 # Hard verification — fail the install loudly here rather than letting Phase 6 crash

@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B4";
-const uint16_t INNOPILOT_BUILD_NUM = 4;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B7";
+const uint16_t INNOPILOT_BUILD_NUM = 7;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -60,6 +60,11 @@ const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote n
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
+
+// Nano->Bridge: 5V logic-rail voltage (shared Pi/Nano 5V bus, sensed on A3) * 100,
+// uint16.  e.g. 5.20 V -> 520.  Bridge logs/monitors this (forwarded to pypilot too,
+// which ignores codes it doesn't recognise).  Added to diagnose motor-load brown-out.
+const uint8_t PI_VOLTAGE_CODE        = 0xB4;
 
 // Nano->Bridge: H-bridge pin state change (diagnostic, on-change only)
 // value bits: [2]=D9/EN(PWM)  [1]=D3/LPWM  [0]=D2/RPWM
@@ -186,7 +191,7 @@ const uint8_t DIRB_LIMIT_PIN   = 7;   // Dir-B end limit switch
 const uint8_t DIRA_LIMIT_PIN   = 8;   // Dir-A end limit switch
 
 const float ADC_VREF              = 5.00f;
-const float VOLTAGE_SCALE         = 3.323f; // Change to 3.323f for .12 and 5.156f for .13
+const float VOLTAGE_SCALE         = 4.855f; // Per-board: bench-calibrate. Malu(.13)=4.855 (multimeter 12.985V vs reported 8.887V @3.323, 2026-06-26 = 3.323*12.985/8.887). Examples: .12=3.323, .13~5.156 nominal.
 
 // New sensor calibration from ADC readings:
 // @ 0 A  : ADC = 430 -> V0 ≈ 2.103 V
@@ -204,7 +209,7 @@ const uint8_t ADC_SAMPLES         = 16;
 // Tune RUDDER_FIFO_SIZE to trade smoothness vs step-response lag.
 const uint8_t RUDDER_FIFO_SIZE    = 16;
 
-const float PI_VSENSE_SCALE = 5.25f;
+const float PI_VSENSE_SCALE = 5.17f; // Malu: bench-calibrated 2026-06-26 (multimeter 5.1V vs reported 5.18V @5.25). Per-board.
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
 const float MAX_CONTROLLER_TEMP_C = 50.0f;
@@ -223,7 +228,6 @@ uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full Dir-A
 // States: 0 = DRIVING (toward target), 1 = BRAKING (timed reverse pulse), 2 = SETTLED (in deadband)
 enum RemoteManualState : uint8_t { RM_DRIVING = 0, RM_BRAKING = 1, RM_SETTLED = 2 };
 RemoteManualState rm_state         = RM_SETTLED;
-int8_t            rm_brake_dir     = 0;       // direction of brake pulse (-1 or +1)
 unsigned long     rm_brake_start_ms = 0;      // millis() when brake pulse began
 unsigned long     rm_brake_dur_ms  = 0;       // computed brake duration for this pulse
 
@@ -607,6 +611,18 @@ void comms_err_bucket_tick(unsigned long now) {
 }
 
 uint16_t read_adc_avg(uint8_t pin, uint8_t samples) {
+  // ADC mux settle (Fix #B7): switching the ADC multiplexer leaves the previous
+  // channel's charge on the sample/hold cap.  For the high-impedance voltage
+  // dividers (A3 Pi/5V rail, A0 Vin) the first conversions after a channel switch
+  // can read the OLD channel's level — observed as A3 intermittently reporting
+  // ~14 V (= Vin's pin voltage), which falsely tripped the PiV HIGH alarm.  Discard
+  // a few throwaway reads so the S/H cap settles to THIS pin before we average.
+  // (Same idea as the dummy reads in service_rudder_adc().)
+  for (uint8_t s = 0; s < 3; s++) {
+    (void)analogRead(pin);
+    delayMicroseconds(300);
+  }
+
   uint32_t sum = 0;
   for (uint8_t i = 0; i < samples; i++) {
     sum += (uint16_t)analogRead(pin);
@@ -1418,36 +1434,85 @@ void update_motor_from_command() {
   //   RM_SETTLED : inside deadband, motor off
   //
   if (remote_manual_active) {
-    // Map 0..1000 target to ADC range. Convention: target=0 -> Dir-A end (stbd,
-    // high ADC), target=1000 -> Dir-B end (port, low ADC). Linear interpolation
-    // anchored at Dir-A so larger target value drives toward port — matching
-    // the canonical convention enforced across bridge + web UI.
-    int target_adc = RUDDER_ADC_DIRA_END +
-      (int)((long)(RUDDER_ADC_DIRB_END - RUDDER_ADC_DIRA_END) * manual_rud_target_0_1000 / 1000);
-    const int REMOTE_DEADBAND = 21;  // ADC counts — sized to absorb braking residual
+    // ---- Angle-based remote-manual position control (B49) ----
+    // Previously this loop steered on the raw rudder ADC against hard-coded
+    // endpoints (RUDDER_ADC_DIRA_END/DIRB_END = 1022/1) assuming "higher ADC =
+    // Dir-A/stbd".  On a boat whose rudder pot is wired/oriented opposite to that
+    // assumption (or whose travel does not span the full ADC) the error sign
+    // inverts and the rudder runs hard-over to the stop (positive-feedback
+    // runaway) — it never holds the commanded angle.
+    //
+    // Fix: steer on pypilot's CALIBRATED rudder angle (pilot_rudder_deg10, tenths
+    // of a degree, +port / -stbd) and the calibrated limits.  These are correct on
+    // any boat regardless of pot polarity/range, so the loop converges and holds.
+    // Raw ADC is kept ONLY for the (magnitude-only) speed estimate that sizes the
+    // brake pulse.
+    //
+    // Motor convention (reference build): Dir-A (LPWM HIGH) moves the rudder to
+    // STARBOARD (angle decreases); Dir-B (RPWM HIGH) moves to PORT (angle
+    // increases).  FEATURE2_INVERT_MOTOR swaps the H-bridge sense for boats wired
+    // the other way.  Hardware impact: this changes which pin fires for a given
+    // commanded angle — verify on the bench before sea use.
+    //
+    // Fail-safe: without a trustworthy calibrated position (pilot_limits_ok) we must
+    // not drive blind, so the motor is held off.  This means remote-manual steering
+    // now depends on pypilot publishing rudder.angle (it always runs as a service).
+    if (!pilot_limits_ok) {
+      analogWrite(HBRIDGE_PWM_PIN, 0);
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      last_drive_dir = 0;
+      rm_state = RM_SETTLED;
+      return;
+    }
 
-    int error = target_adc - a;      // positive = need to go Dir-A (increase ADC)
-    int abs_error = (error >= 0) ? error : -error;
+    // ---- Axis convention (CRITICAL — Fix #B49b) ----
+    // The bridge transmits the Nano -rudder.angle (PILOT_RUDDER_CODE) plus matching
+    // limits, so on the pilot_rudder_deg10 axis  + = STARBOARD, - = PORT:
+    //   pilot_dira_lim_deg10 = +range -> the STBD (+) end
+    //   pilot_dirb_lim_deg10 = -range -> the PORT (-) end
+    // pilot_limits_ok guarantees pilot_dirb_lim_deg10 < pilot_dira_lim_deg10.
+    // The original B49 code assumed the opposite (+port/-stbd); that single inverted
+    // assumption made the loop positive-feedback and ran the rudder hard-over to the
+    // commanded-side stop.  This axis now matches the rest of the firmware (the
+    // rudder-overshoot check and at_dira_pilot/at_dirb_pilot).
+    int16_t stbd_end_deg10 = pilot_dira_lim_deg10;   // most positive = stbd (+) end
+    int16_t port_end_deg10 = pilot_dirb_lim_deg10;   // most negative = port (-) end
+    int32_t span_deg10     = (int32_t)stbd_end_deg10 - port_end_deg10;  // > 0
 
-    // --- Update rudder speed estimate ---
+    // Map target 0..1000 onto the calibrated range:
+    //   0 = full STBD (+ end), 1000 = full PORT (- end), 500 = centre.
+    int16_t target_deg10 = (int16_t)(stbd_end_deg10 -
+        span_deg10 * (int32_t)manual_rud_target_0_1000 / 1000);
+
+    // Position error (tenths deg): >0 => move toward STBD (increase pilot_rudder_deg10),
+    //                              <0 => move toward PORT (decrease pilot_rudder_deg10).
+    int16_t error     = target_deg10 - pilot_rudder_deg10;
+    int16_t abs_error = (error >= 0) ? error : -error;
+
+    // Angle deadband from the operator deadband_pct (g_deadband = pct*10):
+    //   deadband_deg10 = span_deg10 * pct/100 = span_deg10 * g_deadband / 1000
+    int16_t REMOTE_DEADBAND = (int16_t)(span_deg10 * (int32_t)g_deadband / 1000);
+    if (REMOTE_DEADBAND < 8) REMOTE_DEADBAND = 8;   // ~0.8 deg floor: avoid hunting
+
+    // Reduce PWM within this band of target to limit overshoot between the
+    // ~5 Hz pilot position updates.
+    int16_t SLOW_ZONE_DEG10 = (int16_t)(REMOTE_DEADBAND * 4);
+    const uint8_t RM_SLOW_PWM = 160;
+
+    bool invert_motor = (feature_flags_2 & FEATURE2_INVERT_MOTOR) != 0;
+
+    // --- Local-ADC speed estimate (magnitude only) for brake-pulse sizing ---
     if (now - speed_prev_ms >= SPEED_WINDOW_MS) {
       int delta_adc = a - speed_prev_adc;
       unsigned long dt = now - speed_prev_ms;
-      // cps = delta_adc * 1000 / dt  (signed, +ve = moving Dir-A)
       rudder_speed_cps = (int16_t)((long)delta_adc * 1000L / (long)dt);
       speed_prev_adc = a;
       speed_prev_ms  = now;
     }
-
-    // Absolute speed for brake calculations
     int16_t abs_speed = (rudder_speed_cps >= 0) ? rudder_speed_cps : -rudder_speed_cps;
-
-    // --- Compute brake parameters from current speed ---
-    // brake_ms = (54 * speed + 50) / 100 + 72   (integer-friendly 0.54*speed + 72)
+    // brake_ms = 0.54*speed + 72 (integer-friendly): reverse-pulse duration.
     unsigned long est_brake_ms = (unsigned long)((54L * abs_speed + 50) / 100) + 72UL;
-    // brake distance ≈ speed * brake_ms / 2000 counts
-    int est_brake_dist = (int)((long)abs_speed * (long)est_brake_ms / 2000L);
-    if (est_brake_dist < 1) est_brake_dist = 1;
 
     // --- State machine ---
     switch (rm_state) {
@@ -1485,17 +1550,24 @@ void update_motor_from_command() {
       // fall through
 
       case RM_DRIVING: {
-        // Determine drive direction
+        // dir: +1 = drive STBD (increase angle), -1 = drive PORT (decrease angle)
         int8_t dir = 0;
-        if      (error > 0) dir = +1;   // need Dir-A (increase ADC)
-        else if (error < 0) dir = -1;   // need Dir-B (decrease ADC)
+        if      (error >  REMOTE_DEADBAND) dir = +1;   // need stbd
+        else if (error < -REMOTE_DEADBAND) dir = -1;   // need port
 
-        // Respect hard and soft limits
-        if (dir > 0 && (at_dira_end || at_dira_pilot)) dir = 0;
-        if (dir < 0 && (at_dirb_end || at_dirb_pilot)) dir = 0;
+        // Respect calibrated pilot limits + physical end switches for the end we
+        // would drive into (axis: + = stbd = dira, - = port = dirb).  The over_*_end
+        // terms are a convention-independent ABSOLUTE backstop: even if the steering
+        // sign were wrong again, the motor can never be driven past a calibrated end.
+        bool over_stbd_end = (pilot_rudder_deg10 >= pilot_dira_lim_deg10);  // at/over + end
+        bool over_port_end = (pilot_rudder_deg10 <= pilot_dirb_lim_deg10);  // at/over - end
+        bool blocked_stbd = at_dira_pilot || over_stbd_end || dira_limit_switch_hit();
+        bool blocked_port = at_dirb_pilot || over_port_end || dirb_limit_switch_hit();
+        if (dir > 0 && blocked_stbd) dir = 0;
+        if (dir < 0 && blocked_port) dir = 0;
 
         if (dir == 0) {
-          // At limit or exactly on target — stop
+          // Within deadband or at a limit — stop and hold.
           analogWrite(HBRIDGE_PWM_PIN, 0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -1504,59 +1576,43 @@ void update_motor_from_command() {
           break;
         }
 
-        // Check if we should transition to braking.
-        // We're moving toward the target; is the distance to target centre
-        // within the estimated braking distance?
-        // Only brake if speed is meaningful (above minimum threshold) AND
-        // we're moving toward the target (not away from it).
-        bool moving_toward = (dir > 0 && rudder_speed_cps > 0) ||
-                             (dir < 0 && rudder_speed_cps < 0);
-
-        if (moving_toward && abs_speed >= BRAKE_MIN_SPEED_CPS &&
-            abs_error <= est_brake_dist) {
-          // Initiate reverse brake pulse
-          rm_brake_dir      = -dir;  // opposite to travel direction
+        // If moving fast and inside the pre-brake zone, fire a reverse pulse
+        // (opposite to travel) to kill ram momentum, then settle.
+        if (abs_speed >= BRAKE_MIN_SPEED_CPS &&
+            abs_error <= (int16_t)(REMOTE_DEADBAND * 2)) {
+          bool brake_toward_port = (dir > 0);                  // opposite to travel (dir>0 = driving stbd)
+          bool rpwm_high = brake_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
+          int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
+          if (dd != last_drive_dir && last_drive_dir != 0) {
+            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
+          }
+          digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
+          last_drive_dir    = dd;
           rm_brake_dur_ms   = est_brake_ms;
           rm_brake_start_ms = now;
           rm_state          = RM_BRAKING;
-
-          // Set H-bridge to brake direction at full duty
-          SET_MOTOR_REASON(MRSN_RM_BRAKE);  // B26: record activation reason
-          {
-            int8_t brake_dir = (rm_brake_dir > 0) ? +1 : -1;
-            if (brake_dir != last_drive_dir && last_drive_dir != 0) {
-              analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
-            }
-            if (rm_brake_dir > 0) {
-              digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-              digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-            } else {
-              digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-              digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-            }
-            last_drive_dir = brake_dir;
-          }
+          SET_MOTOR_REASON(MRSN_RM_BRAKE);                    // B26: record activation reason
           analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
           break;
         }
 
-        // Not yet at brake point — drive toward target at full duty
-        SET_MOTOR_REASON(MRSN_RM_DRIVE);  // B26: record activation reason
+        // Drive toward target.  Full duty far out; reduced inside the slow zone to
+        // limit overshoot between pilot position updates.
         {
-          int8_t rm_new_dir = (dir > 0) ? +1 : -1;
-          if (rm_new_dir != last_drive_dir && last_drive_dir != 0) {
-            analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+          bool drive_toward_port = (dir < 0);
+          bool rpwm_high = drive_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
+          int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
+          if (dd != last_drive_dir && last_drive_dir != 0) {
+            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
           }
-          if (dir > 0) {
-            digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-            digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-          } else {
-            digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-            digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-          }
-          last_drive_dir = rm_new_dir;
+          digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
+          last_drive_dir = dd;
+          SET_MOTOR_REASON(MRSN_RM_DRIVE);                    // B26: record activation reason
+          uint8_t pwm = (abs_error <= SLOW_ZONE_DEG10) ? RM_SLOW_PWM : 255;
+          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? pwm : 0);
         }
-        analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
         break;
       }
     }
@@ -2336,6 +2392,19 @@ if (!ap_engaged && !remote_manual_active) {
       scaled = 65535;
     }
     send_frame(VOLTAGE_CODE, (uint16_t)scaled);
+
+    // 5V logic-rail telemetry (A3, shared Pi/Nano 5V bus): value * 100.
+    // Read fresh so it works regardless of FEATURE_PI_VOLTAGE; used to catch a
+    // motor-load brown-out of the shared supply that can reset the Nano.
+    float v5 = read_pi_voltage_v();
+    int scaled5 = (int)(v5 * 100.0f + 0.5f);
+    if (scaled5 < 0) {
+      scaled5 = 0;
+    } else if (scaled5 > 65535) {
+      scaled5 = 65535;
+    }
+    send_frame(PI_VOLTAGE_CODE, (uint16_t)scaled5);
+
     last_voltage_ms = now;
   }
 
